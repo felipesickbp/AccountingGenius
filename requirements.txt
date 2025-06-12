@@ -1,0 +1,6 @@
+streamlit
+pandas
+pyyaml
+python-dateutil
+chardet
+click
