@@ -20,7 +20,7 @@ from bookkeeping_app import (
 
 
 st.set_page_config(page_title="Bookkeeping", layout="centered")
-st.title("📄 ➜ 💼  Bank CSV → Ledger")
+st.title("Bank CSV → Ledger")
 
 # ----------------------------------------------------------------------------
 # Widgets
