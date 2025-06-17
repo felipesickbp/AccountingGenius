@@ -93,4 +93,3 @@ def process_excel(
         }
     )
     return out
-
