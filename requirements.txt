@@ -1,5 +1,6 @@
 streamlit
 pandas
+openpyxl>=3.1         # ← add this line
 pyyaml
 python-dateutil
 chardet
