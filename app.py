@@ -63,8 +63,6 @@ TEMPLATE_ORDER = [
     "Belegnummer", "Datum", "Beschreibung", "Betrag", "Währung", "Wechselkurs",
     "Soll", "Haben", "MWST Code", "MWST Konto",
 ]
-# Was:
-# MWST_ACCOUNTS = {"6210", "6260", "6510", "6530", "6640"}
 
 _MWST_ACCOUNTS = {
     "1500", "1510", "1520", "1530",        # Maschinen, Mobiliar, IT, Fahrzeuge
@@ -79,8 +77,6 @@ _MWST_ACCOUNTS = {
     "6640", "6641",                        # Reisespesen / Kundenbetreuung
     "6740",                                # Vorsteuerkorrektur
 }
-
-# exactly the same literal for _MWST_ACCOUNTS in raiffeisen_transform.py
 
 
 
