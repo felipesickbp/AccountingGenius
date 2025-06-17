@@ -1,186 +1,134 @@
 """
-Streamlit front-end – v3
-—————————
-* PostFinance  → bookkeeping_app.py   (CSV)
-* Raiffeisen   → raiffeisen_transform (Excel)
-* Adds running Belegnummer, MWST Code & MWST Konto
+raiffeisen_transform.py – v1.2
+——————————————
+Parses Raiffeisen XLS/XLSX statements and delivers a 10-column
+ledger ready for export:
+
+    Belegnummer | date | description | amount | soll | haben
+    | needs_review | MWST Code | MWST Konto
+
+Additions in this version
+=========================
+* Prepends a running Belegnummer (counter) – default start = 1
+* Adds MWST Code + MWST Konto:
+      – if booking account ∈ {6210, 6260, 6510, 6530, 6640}
+        → MWST Code  = "VB81"
+          MWST Konto = same account number
 """
 
 from __future__ import annotations
 import io
-import tempfile
-from pathlib import Path
+from typing import Union, BinaryIO
 
 import pandas as pd
-import streamlit as st
-import yaml
+
+from bookkeeping_app import KontierungEngine
+
 
 # --------------------------------------------------------------------------- #
-#  back-end helpers                                                           #
+#  Helpers                                                                     #
 # --------------------------------------------------------------------------- #
-from bookkeeping_app import (
-    read_bank_csv,
-    normalise_columns,
-    clean_description,
-    KontierungEngine,
-)
-import raiffeisen_transform
+_MWST_ACCOUNTS = {"6210", "6260", "6510", "6530", "6640"}
 
-# --------------------------------------------------------------------------- #
-#  UI                                                                          #
-# --------------------------------------------------------------------------- #
-st.set_page_config(page_title="Bank ↦ Ledger", layout="centered")
-st.title("Bank Statement → Ledger CSV")
 
-BANKS   = ["PostFinance", "Raiffeisen"]
-CLIENTS = ["DB Financial", "Example AG", "Other Ltd"]
+def _load_xl(file: Union[str, bytes, BinaryIO]) -> pd.DataFrame:
+    """Accept path-like, bytes, or file-like."""
+    if isinstance(file, (str, bytes, bytearray)):
+        return pd.read_excel(file, header=None, engine="openpyxl")
+    # Streamlit passes an UploadedFile → file-like
+    return pd.read_excel(file, header=None, engine="openpyxl")
 
-bank   = st.selectbox("Bank", BANKS,   index=0)
-client = st.selectbox("Client", CLIENTS, index=0)
-
-start_no = st.number_input(
-    "First voucher number (Belegnummer-Start)",
-    min_value=1,
-    value=1,
-    step=1,
-)
-
-# Load / show YAML
-cfg_path = Path("configs") / f"{client.lower().replace(' ', '_')}.yaml"
-default_yaml = (
-    cfg_path.read_text("utf-8")
-    if cfg_path.exists()
-    else "keywords:\n  \"coop|migros\": 4050\n"
-)
-yaml_text = st.text_area(
-    "Keyword → Konto mapping (YAML)",
-    value=default_yaml,
-    height=180,
-)
-
-file_types      = {"PostFinance": ["csv"], "Raiffeisen": ["xlsx", "xls"]}
-uploader_label  = f"Upload {bank} statement ({', '.join(file_types[bank])})"
-data_file       = st.file_uploader(uploader_label, type=file_types[bank])
 
 # --------------------------------------------------------------------------- #
-#  Process                                                                    #
+#  Public API                                                                  #
 # --------------------------------------------------------------------------- #
-if data_file and st.button("Process"):
-    # -- 1  YAML  ----------------------------------------------------------- #
-    try:
-        cfg = yaml.safe_load(yaml_text) or {}
-        # cast every Konto to string → prevents 6530.0
-        if "keywords" in cfg:
-            cfg["keywords"] = {pat: str(acct) for pat, acct in cfg["keywords"].items()}
-        engine = KontierungEngine(cfg.get("keywords", {}))
-    except yaml.YAMLError as err:
-        st.error(f"YAML parsing error: {err}")
-        st.stop()
+def process_excel(
+    uploaded_file: Union[str, bytes, io.BufferedReader],
+    engine: KontierungEngine,
+    start_no: int = 1,                     # ← where the counter begins
+) -> pd.DataFrame:
+    """
+    Parse a Raiffeisen statement and return a tidy ledger DataFrame.
 
-    # -- 2  Parse statement ------------------------------------------------- #
-    if bank == "PostFinance":
-        # write temp file so legacy CSV reader can open it
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-            tmp.write(data_file.getvalue())
-            tmp_path = Path(tmp.name)
-        try:
-            df = read_bank_csv(tmp_path)
-        except Exception as exc:
-            st.error(f"❌ Failed to read CSV: {exc}")
-            st.stop()
+    Parameters
+    ----------
+    uploaded_file : str | bytes | BinaryIO
+        Incoming XLS/XLSX file (path, bytes or IO stream).
+    engine : KontierungEngine
+        Keyword→account classifier inherited from bookkeeping_app.py.
+    start_no : int, default 1
+        First voucher number (Belegnummer).
 
-        df = normalise_columns(df)
-        df["description"] = df["description"].astype(str).apply(clean_description)
-        df["amount"] = (
-            df["amount"]
-            .astype(str)
-            .str.replace("'", "")
-            .str.replace(",", ".")
-            .astype(float)
-        )
+    Returns
+    -------
+    pandas.DataFrame
+        Columns (in order):
+        [Belegnummer, date, description, amount, soll, haben,
+         needs_review, MWST Code, MWST Konto]
+    """
+    # ------------------------------------------------------------------ 0  read raw
+    df_raw = _load_xl(uploaded_file)
 
-        # date to Swiss format
-        df["date"] = pd.to_datetime(df["date"], dayfirst=True).dt.strftime("%d.%m.%Y")
+    # ------------------------------------------------------------------ 1  drop IBAN
+    df = df_raw.drop(columns=0)
+    df.columns = range(df.shape[1])        # rename to 0,1,2,...
 
-        # classification
-        df["account"] = df["description"].apply(engine.classify).astype(str)
+    # ------------------------------------------------------------------ 2  date format
+    df[0] = pd.to_datetime(df[0], errors="coerce").dt.strftime("%d.%m.%Y")
 
-        def _soll(r):  # strings only
-            return "1020" if r.amount > 0 else (r.account if r.account != "None" else "")
+    # ------------------------------------------------------------------ 3  merge continuation lines
+    to_delete = []
+    for i in range(1, len(df)):
+        if pd.isna(df.iat[i, 0]) and df.iloc[i, 2:].isna().all():
+            if not pd.isna(df.iat[i, 1]):
+                prev_txt = str(df.iat[i - 1, 1]) if not pd.isna(df.iat[i - 1, 1]) else ""
+                df.iat[i - 1, 1] = f"{prev_txt} {df.iat[i, 1]}".strip()
+            to_delete.append(i)
 
-        def _haben(r):
-            return "1020" if r.amount < 0 else (r.account if r.account != "None" else "")
+    if to_delete:
+        df = df.drop(index=to_delete).reset_index(drop=True)
 
-        df["soll"]  = df.apply(_soll,  axis=1)
-        df["haben"] = df.apply(_haben, axis=1)
+    df[0].fillna(method="ffill", inplace=True)   # in case top rows were NaN
 
-        df = df[["date", "description", "amount", "soll", "haben", "account"]]
-
-    else:  # ---------------- Raiffeisen Excel ----------------------------- #
-        try:
-            df = raiffeisen_transform.process_excel(data_file, engine, start_no=start_no)
-        except Exception as exc:
-            st.error(f"❌ Failed to parse Excel: {exc}")
-            st.stop()
-
-    # -- 3  Ensure template columns ---------------------------------------- #
-    if bank == "PostFinance":
-        MWST_ACCOUNTS = {"6210", "6260", "6510", "6530", "6640"}
-
-        df["MWST Code"]  = df["account"].apply(lambda a: "VB81" if a in MWST_ACCOUNTS else "")
-        df["MWST Konto"] = df["account"].apply(lambda a: a      if a in MWST_ACCOUNTS else "")
-
-        df.insert(0, "Belegnummer", range(int(start_no), int(start_no) + len(df)))
-        df["Währung"]     = "CHF"
-        df["Wechselkurs"] = ""
-
-        df = df.rename(
-            columns={
-                "date":        "Datum",
-                "description": "Beschreibung",
-                "amount":      "Betrag",
-                "soll":        "Soll",
-                "haben":       "Haben",
-            }
-        )
-
-        order = [
-            "Belegnummer",
-            "Datum",
-            "Beschreibung",
-            "Betrag",
-            "Währung",
-            "Wechselkurs",
-            "Soll",
-            "Haben",
-            "MWST Code",
-            "MWST Konto",
-        ]
-        df = df[order]
-
-    else:
-        # raiffeisen_transform already returns final columns; just re-order to be safe
-        order = [
-            "Belegnummer",
-            "Datum",
-            "Beschreibung",
-            "Betrag",
-            "Währung",
-            "Wechselkurs",
-            "Soll",
-            "Haben",
-            "MWST Code",
-            "MWST Konto",
-        ]
-        df = df[order]
-
-    # -- 4  Preview & download --------------------------------------------- #
-    st.subheader("Preview")
-    st.dataframe(df.head(15), use_container_width=True)
-
-    st.download_button(
-        "Download ledger CSV",
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name=f"{Path(data_file.name).stem}_ledger.csv",
-        mime="text/csv",
+    # ------------------------------------------------------------------ 4  numeric amount, soll/haben
+    df[2] = (
+        df[2]
+        .astype(str)
+        .str.replace("CHF", "", regex=False)
+        .str.replace("'", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.replace(" ", "", regex=False)
     )
+    df[2] = pd.to_numeric(df[2], errors="coerce")
+
+    df["account"] = df[1].astype(str).apply(engine.classify)
+    df["soll"]   = df.apply(lambda r: "1020" if r[2] > 0 else (r["account"] or ""), axis=1)
+    df["haben"]  = df.apply(lambda r: "1020" if r[2] < 0 else (r["account"] or ""), axis=1)
+    df[2] = df[2].abs()
+
+    # ------------------------------------------------------------------ 5  MWST logic
+    def _mwst_code(acct: str) -> str:
+        return "VB81" if acct in _MWST_ACCOUNTS else ""
+
+    df["MWST Code"]  = df["account"].apply(_mwst_code)
+    df["MWST Konto"] = df["account"].apply(
+        lambda a: a if a in _MWST_ACCOUNTS else ""
+    )
+
+    # ------------------------------------------------------------------ 6  assemble output
+    out = pd.DataFrame(
+        {
+            "Belegnummer": range(int(start_no), int(start_no) + len(df)),
+            "date":         df[0],
+            "description":  df[1],
+            "amount":       df[2],
+            "soll":         df["soll"],
+            "haben":        df["haben"],
+            "needs_review": df["account"].isna(),
+            "MWST Code":    df["MWST Code"],
+            "MWST Konto":   df["MWST Konto"],
+        }
+    )
+
+    return out
+
