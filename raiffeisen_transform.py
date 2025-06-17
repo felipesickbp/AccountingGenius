@@ -28,8 +28,6 @@ from bookkeeping_app import KontierungEngine
 # --------------------------------------------------------------------------- #
 #  Helpers                                                                     #
 # --------------------------------------------------------------------------- #
-# Was:
-# MWST_ACCOUNTS = {"6210", "6260", "6510", "6530", "6640"}
 
 MWST_ACCOUNTS = {
     "1500", "1510", "1520", "1530",        # Maschinen, Mobiliar, IT, Fahrzeuge
@@ -45,7 +43,6 @@ MWST_ACCOUNTS = {
     "6740",                                # Vorsteuerkorrektur
 }
 
-# exactly the same literal for _MWST_ACCOUNTS in raiffeisen_transform.py
 
 
 
