@@ -110,7 +110,7 @@ def finalise(df: pd.DataFrame, first_no: int) -> pd.DataFrame:
     if {"MWST Code", "MWST Konto"}.issubset(df.columns) is False:
         df["MWST Code"]  = ""
         df["MWST Konto"] = ""
-    mask = df["Soll"].isin(MWST_ACCOUNTS) | df["Haben"].isin(MWST_ACCOUNTS)
+    mask = df["Soll"].isin(_MWST_ACCOUNTS) | df["Haben"].isin(_MWST_ACCOUNTS)
     df.loc[mask, "MWST Code"]  = "VB81"
     df.loc[mask, "MWST Konto"] = (
         df.loc[mask, ["Soll", "Haben"]].bfill(axis=1).iloc[:, 0]
