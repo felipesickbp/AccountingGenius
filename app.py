@@ -64,7 +64,7 @@ TEMPLATE_ORDER = [
     "Soll", "Haben", "MWST Code", "MWST Konto",
 ]
 
-_MWST_ACCOUNTS = {
+MWST_ACCOUNTS = {
     "1500", "1510", "1520", "1530",        # Maschinen, Mobiliar, IT, Fahrzeuge
     "5008",                                # übriger Personalaufwand
     "5810", "5820", "5821", "5880",        # Weiterbildung / Spesen / Anlässe
