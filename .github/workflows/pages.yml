@@ -1,25 +1,24 @@
-name: Build & Deploy stlite
+name: Deploy static Stlite site
 on: [push]
 
 permissions:
   contents: read
-  pages: write
-  id-token: write   # mandatory for deploy-pages@v4
+  pages:    write
+  id-token: write
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: npm install -g @stlite/browser      # installs stlite toolchain
-      - run: stlite dump app.py --requirements requirements.txt
+      # Copy only the web assets to a clean folder
+      - run: |
+          mkdir site
+          cp index.html app.py requirements.txt site/
+          cp *.py site/ || true          # catch helpers if they exist
       - uses: actions/upload-pages-artifact@v3
-        with: {path: dist}                      # stlite creates ./dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment: {name: github-pages}
-    steps:
-      - id: deploy
-        uses: actions/deploy-pages@v4
+        with: {path: site}
+      - uses: actions/deploy-pages@v4
+        id: deploy
+        env:
+          name: github-pages
