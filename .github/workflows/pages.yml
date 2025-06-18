@@ -3,22 +3,26 @@ on: [push]
 
 permissions:
   contents: read
-  pages:    write
-  id-token: write
+  pages: write
+  id-token: write          # deploy-pages needs this
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Copy only the web assets to a clean folder
-      - run: |
+
+      # Copy only the web assets into ./site
+      - name: Collect assets
+        run: |
           mkdir site
           cp index.html app.py requirements.txt site/
-          cp *.py site/ || true          # catch helpers if they exist
+          cp *.py site/ || true        # helper modules if they exist
+          cp -r configs site/ || true # your YAML folder
+
       - uses: actions/upload-pages-artifact@v3
-        with: {path: site}
+        with: { path: site }
+
       - uses: actions/deploy-pages@v4
-        id: deploy
-        env:
-          name: github-pages
+        env: { name: github-pages }
+        id: deployment
