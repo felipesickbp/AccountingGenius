@@ -17,7 +17,7 @@ jobs:
       # Build the static stlite site (pick *one* of the 3 lines below)
       # - uses: whitphx/stlite-action@v1        # if v1 exists
       # - uses: whitphx/stlite-action@v0.3.0    # pin to a real tag
-      - uses: whitphx/stlite-action@09743b22f5ba92c8b7ad0c7d28f7e8960c5207d3
+      - uses: whitphx/stlite-action@v0.3.0        # latest tag
         with:
           entrypoint: app.py           # or bookkeeping_app.py
           requirements: requirements.txt
