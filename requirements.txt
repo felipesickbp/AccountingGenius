@@ -1,4 +1,4 @@
-streamlit
+
 pandas
 openpyxl>=3.1         # ← add this line
 pyyaml
