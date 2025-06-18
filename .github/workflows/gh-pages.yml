@@ -1,0 +1,11 @@
+name: Build & Deploy stlite
+on: [push]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: whitphx/stlite-action@v1  # turns repo into static site
+      - uses: actions/upload-pages-artifact@v3
+        with: {path: ./dist}
+      - uses: actions/deploy-pages@v4
