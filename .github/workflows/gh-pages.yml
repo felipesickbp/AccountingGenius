@@ -1,11 +1,43 @@
 name: Build & Deploy stlite
-on: [push]
+on:
+  push:
+    branches: [main]
+
+# 1️⃣  The Pages actions need these three scopes
+permissions:
+  contents: read      # checkout the repo
+  pages:    write     # push the site
+  id-token: write     # get an OIDC token
+
+concurrency:          # optional but recommended
+  group: "pages"
+  cancel-in-progress: false
+
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: whitphx/stlite-action@v1  # turns repo into static site
-      - uses: actions/upload-pages-artifact@v3
-        with: {path: ./dist}
-      - uses: actions/deploy-pages@v4
+
+      # 2️⃣  Turn your Streamlit code into a static stlite site
+      - uses: whitphx/stlite-action@v1
+        with:
+          entrypoint: app.py          # main Streamlit script
+          requirements: requirements.txt
+
+      # 3️⃣  Upload the ./dist folder produced by stlite-action
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist                 # <- stlite-action always writes here
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages            # MUST be this exact name
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
