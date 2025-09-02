@@ -63,20 +63,17 @@ REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
 SCOPES = _get(
     "BEXIO_SCOPES",
-    "openid profile email offline_access",
+    "openid profile offline_access contact_edit kb_invoice_edit bank_payment_edit",
 )
-
-
 
 # Fail fast if empty or still placeholders
 if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIENT_ID, CLIENT_SECRET)):
     st.error("Missing BEXIO_CLIENT_ID / BEXIO_CLIENT_SECRET. Fill the HARDCODED_* values or set Streamlit secrets.")
     st.stop()
 
-# OIDC discovery on the current issuer (https://auth.bexio.com)
-OIDC_ISSUER = _get("BEXIO_OIDC_ISSUER", "https://auth.bexio.com")
-DISCOVERY_URL = f"{OIDC_ISSUER}/.well-known/openid-configuration")
-
+# OIDC discovery on the new issuer (https://idp.bexio.com)
+OIDC_ISSUER = _get("BEXIO_OIDC_ISSUER", "https://idp.bexio.com")
+DISCOVERY_URL = f"{OIDC_ISSUER}/.well-known/openid-configuration"
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _discover_oidc() -> Dict[str, str]:
@@ -120,7 +117,7 @@ if "editor_df" not in st.session_state:
 
 
 BANKS   = ["PostFinance", "Raiffeisen"]
-CLIENTS = ["DB Financial", "Kuhn Dienstleistungen", "Elixavita Carelife GmbH", "Other Ltd"]
+CLIENTS = ["DB Financial", "Example AG", "Other Ltd"]
 
 left, right = st.columns([1, 1])
 with left:
@@ -381,6 +378,14 @@ def _api_headers() -> Dict[str, str]:
     return headers
 
 
+    # OAuth fallback
+    _refresh_token_if_needed()
+    tok: Token = st.session_state.get("bexio_token")  # may be None
+    if not tok:
+        # No PAT and no OAuth token yet
+        return {"Accept": "application/json"}
+    return {"Accept": "application/json", "Authorization": f"Bearer {tok.access_token}"}
+
 def get_userinfo() -> Optional[Dict]:
     try:
         headers = _api_headers()
@@ -392,107 +397,10 @@ def get_userinfo() -> Optional[Dict]:
     return None
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Accounting API v3 helpers (lookups + base path)
-# ──────────────────────────────────────────────────────────────────────────────
-ACCOUNTING_BASE = "https://api.bexio.com/3.0/accounting"
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _fetch_accounts_map() -> Dict[str, int]:
-    """
-    Map account number (e.g., '1020') -> account id (int).
-    - Follows pagination via RFC5988 Link header (rel="next")
-    - Tolerates different field names (account_nr, number, account_number)
-    - Normalizes numbers (trim, remove NBSP/whitespace, drop leading zeros variant)
-    """
-    import re
-
-    def _norm(n: str) -> str:
-        # strip spaces (incl. non-breaking), keep digits; typical CH charts have no leading zeros
-        s = re.sub(r"\s+", "", str(n or "")).replace("\u00A0", "").strip()
-        return s
-
-    def _norm_both_keys(n: str):
-        # return both the raw-normalized and a "no-leading-zeros" variant for matching
-        raw = _norm(n)
-        no0 = raw.lstrip("0") if raw else raw
-        return {raw, no0} if raw != no0 and no0 else {raw}
-
-    headers = _api_headers()
-    url = f"{ACCOUNTING_BASE}/accounts"
-    all_rows = []
-
-    def _next_from_link(link_header: Optional[str]) -> Optional[str]:
-        if not link_header:
-            return None
-        # Example: <https://.../accounts?page=2>; rel="next", <...>; rel="last"
-        for part in link_header.split(","):
-            seg = part.strip()
-            if 'rel="next"' in seg:
-                start = seg.find("<") + 1
-                end = seg.find(">", start)
-                if start > 0 and end > start:
-                    return seg[start:end]
-        return None
-
-    # pull all pages
-    while url:
-        r = requests.get(url, headers=headers, timeout=30)
-        r.raise_for_status()
-        chunk = r.json() or []
-        if not isinstance(chunk, list):
-            # some APIs return {data:[...]} — be defensive
-            chunk = chunk.get("data", [])
-        all_rows.extend(chunk)
-        url = _next_from_link(r.headers.get("Link"))
-
-    # build map with tolerant keys
-    m: Dict[str, int] = {}
-    for a in all_rows:
-        nr = a.get("account_nr") or a.get("number") or a.get("account_number")
-        aid = a.get("id")
-        if nr and aid:
-            for key in _norm_both_keys(nr):
-                if key:  # last one wins is fine
-                    m[str(key)] = int(aid)
-    return m
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _fetch_currency_map() -> Dict[str, int]:
-    """
-    Map currency code (e.g., 'CHF') -> currency id (int).
-    Try v3 first, then v2 fallback; default to CHF=1 if unknown.
-    """
-    headers = _api_headers()
-    # v3
-    try:
-        r = requests.get("https://api.bexio.com/3.0/currencies", headers=headers, timeout=30)
-        if r.ok:
-            data = r.json() or []
-            m = { (c.get("code") or "").strip(): int(c["id"]) for c in data if c.get("id") }
-            if m:
-                return m
-    except Exception:
-        pass
-    # v2 fallback
-    try:
-        r2 = requests.get("https://api.bexio.com/2.0/currency", headers=headers, timeout=30)
-        if r2.ok:
-            data2 = r2.json() or []
-            m2 = { (c.get("name") or "").strip(): int(c["id"]) for c in data2 if c.get("id") }
-            if m2:
-                return m2
-    except Exception:
-        pass
-    return {"CHF": 1}
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # Connect to bexio UI
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.header("Connect to bexio (auth.bexio.com)")
-
+st.header("Connect to bexio (idp.bexio.com)")
 
 with st.expander("OAuth debug"):
     st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
@@ -521,98 +429,10 @@ with right:
         if _exchange_code_for_token(code):
             st.query_params.clear()
             st.rerun()
-def row_to_manual_entry(row: pd.Series,
-                        accounts_map: Dict[str, int],
-                        currency_map: Dict[str, int]) -> Tuple[Optional[Dict], Optional[str]]:
-    import re
-
-    def _norm(n: str) -> str:
-        s = re.sub(r"\s+", "", str(n or "")).replace("\u00A0", "").strip()
-        return s
-
-    def _lookup(nr: str) -> Optional[int]:
-        # try raw, then no-leading-zeros
-        raw = _norm(nr)
-        if raw in accounts_map:
-            return accounts_map[raw]
-        no0 = raw.lstrip("0")
-        if no0 and no0 in accounts_map:
-            return accounts_map[no0]
-        return None
-
-    # Date
-    date_str = str(row.get("Datum", "")).strip()
-    try:
-        date_iso = datetime.strptime(date_str, "%d.%m.%Y").date().isoformat() if date_str else None
-    except Exception:
-        date_iso = None
-
-    # Amount
-    amount_raw = row.get("Betrag", "")
-    try:
-        amount_f = float(str(amount_raw).replace("'", "").replace(",", ".")) if amount_raw != "" else 0.0
-    except Exception:
-        amount_f = 0.0
-    amount_abs = round(abs(amount_f), 2)
-
-    # Accounts → ids
-    soll_nr  = str(row.get("Soll", "") or "")
-    haben_nr = str(row.get("Haben", "") or "")
-    if not soll_nr or not haben_nr:
-        return None, "Missing Soll/Haben account number(s)"
-
-    debit_id  = _lookup(soll_nr)
-    credit_id = _lookup(haben_nr)
-    if not debit_id or not credit_id:
-        missing = []
-        if not debit_id:  missing.append(f"Soll '{soll_nr.strip()}'")
-        if not credit_id: missing.append(f"Haben '{haben_nr.strip()}'")
-        return None, "Unknown account number(s): " + ", ".join(missing)
-
-    # Currency → id
-    code = (str(row.get("Währung", "CHF")).strip() or "CHF")
-    currency_id = currency_map.get(code) or currency_map.get("CHF") or 1
-    fx = str(row.get("Wechselkurs", "")).strip()
-    try:
-        currency_factor = float(fx) if fx else 1.0
-    except Exception:
-        currency_factor = 1.0
-
-    desc = (str(row.get("Beschreibung", "")).strip() or None)
-    ref  = (str(row.get("Belegnummer", "")).strip() or None)
-
-    payload: Dict = {
-        "type": "manual_single_entry",
-        "date": date_iso,
-        "reference_nr": ref,
-        "entries": [
-            {
-                "debit_account_id":  int(debit_id),
-                "credit_account_id": int(credit_id),
-                "amount":            amount_abs,
-                "currency_id":       int(currency_id),
-                "currency_factor":   currency_factor,
-                "description":       desc,
-            }
-        ],
-    }
-    return payload, None
-
-
-def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
-    headers = _api_headers()
-    if "Authorization" not in headers:
-        return False, "Not authenticated (OAuth missing)"
-    url = f"{ACCOUNTING_BASE}/manual_entries"  # v3 path
-    r = requests.post(url, headers=headers, json=payload, timeout=30)
-    if r.ok:
-        return True, r.text
-    return False, f"{r.status_code}: {r.text}"
-
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# UI: Post rows to bexio (with dry-run)
+# Posting to bexio – build payloads and send
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.header("Post rows to bexio (manual entries)")
@@ -628,49 +448,7 @@ if not sources:
 else:
     choice = st.radio("Source", list(sources.keys()), horizontal=True)
     df_src = sources[choice]
-
-    # Preflight: check which account numbers from the grid exist in bexio
-    with st.expander("Preflight: check accounts present in bexio"):
-        if _is_authenticated():
-            acc_map = _fetch_accounts_map()
-            st.caption(f"Fetched {len(acc_map)} accounts from bexio.")
-
-            import re
-            def _norm(n: str) -> str:
-                return re.sub(r"\s+", "", str(n or "")).replace("\u00A0", "").strip()
-
-            # Be robust if one of the columns is missing
-            present_cols = [c for c in ("Soll", "Haben") if c in df_src.columns]
-            if present_cols:
-                df_accounts = set(
-                    _norm(x)
-                    for x in pd.concat([df_src[c] for c in present_cols], axis=0)
-                          .dropna()
-                          .astype(str)
-                )
-                missing = []
-                for a in sorted(df_accounts):
-                    if not a:
-                        continue
-                    if a in acc_map:
-                        continue
-                    a_no0 = a.lstrip("0")
-                    if a_no0 and a_no0 in acc_map:
-                        continue
-                    missing.append(a)
-                if missing:
-                    st.error(
-                        f"Missing in bexio: {', '.join(missing[:50])}"
-                        + (" …" if len(missing) > 50 else "")
-                    )
-                else:
-                    st.success("All account numbers in your grid exist in bexio.")
-            else:
-                st.warning("Columns 'Soll'/'Haben' not found in the grid.")
-        else:
-            st.info("Connect via OAuth to run the preflight account check.")
-
-    st.dataframe(df_src.head(10), width="stretch")
+    st.dataframe(df_src.head(10), width="stretch")  # use new API
 
     col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
@@ -680,16 +458,12 @@ else:
     with col3:
         st.caption("Tip: start with Dry run to validate payloads.")
 
-    # Enable the button if authenticated OR dry-run
+    # Button enabled if authenticated or you're in dry-run
     disabled = (not _is_authenticated()) and (not dry_run)
     if st.button("Post to bexio now", disabled=disabled):
         if not dry_run and not _is_authenticated():
             st.error("Please connect to bexio first (OAuth).")
             st.stop()
-
-        # Lookups (only when needed)
-        accounts_map = _fetch_accounts_map() if not dry_run else {}
-        currency_map = _fetch_currency_map() if not dry_run else {"CHF": 1}
 
         n = min(len(df_src), int(row_limit))
         progress = st.progress(0.0)
@@ -697,23 +471,19 @@ else:
         errors = []
 
         for i, (_, row) in enumerate(df_src.head(n).iterrows(), start=1):
-            # Build payload in v3 shape
-            payload, err = row_to_manual_entry(row, accounts_map, currency_map)
-            if err:
-                errors.append({"row": i, "error": err, "payload": None})
-                progress.progress(i / n)
-                continue
-
+            payload = row_to_manual_entry(row)
             if dry_run:
                 st.code(json.dumps(payload, ensure_ascii=False, indent=2))
                 ok = True
+                msg = "(dry-run)"
             else:
                 ok, msg = post_manual_entry(payload)
-                if not ok:
-                    errors.append({"row": i, "error": msg, "payload": payload})
 
             if ok:
                 ok_count += 1
+            else:
+                errors.append({"row": i, "error": msg, "payload": payload})
+
             progress.progress(i / n)
 
         st.success(f"Done: {ok_count}/{n} successful.")
@@ -721,5 +491,74 @@ else:
             with st.expander("Show errors"):
                 for e in errors:
                     st.write(f"Row {e['row']}: {e['error']}")
-                    if e["payload"] is not None:
-                        st.code(json.dumps(e["payload"], ensure_ascii=False, indent=2))
+                    st.code(json.dumps(e["payload"], ensure_ascii=False, indent=2))
+
+def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
+    headers = _api_headers()  # OAuth only now
+    if "Authorization" not in headers:
+        return False, "Not authenticated (OAuth missing)"
+    url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    if r.ok:
+        return True, r.text
+    return False, f"{r.status_code}: {r.text}"
+
+
+
+# Choose source for posting
+st.markdown("---")
+st.header("Post rows to bexio (manual entries)")
+
+sources: Dict[str, pd.DataFrame] = {}
+if isinstance(st.session_state.get("editor_df"), pd.DataFrame):
+    sources["Edited grid"] = st.session_state["editor_df"]
+if isinstance(st.session_state.get("ledger_df"), pd.DataFrame):
+    sources["Processed ledger (original)"] = st.session_state["ledger_df"]
+
+if not sources:
+    st.info("Load/process data first to enable posting.")
+else:
+    choice = st.radio("Source", list(sources.keys()), horizontal=True)
+    df_src = sources[choice]
+    st.dataframe(df_src.head(10), use_container_width=True)
+
+    col1, col2, col3 = st.columns([1, 1, 2])
+    with col1:
+        dry_run = st.toggle("Dry run (don’t call API)", value=True)
+    with col2:
+        row_limit = st.number_input("Max rows", min_value=1, value=50, step=10)
+    with col3:
+        st.caption("Tip: start with Dry run to validate payloads.")
+
+    if st.button("Post to bexio now", disabled=(not _token_valid()) and (not dry_run)):
+        if not dry_run and not _token_valid():
+            st.error("Please connect to bexio first.")
+            st.stop()
+
+        n = min(len(df_src), int(row_limit))
+        progress = st.progress(0.0)
+        ok_count = 0
+        errors = []
+
+        for i, (_, row) in enumerate(df_src.head(n).iterrows(), start=1):
+            payload = row_to_manual_entry(row)
+            if dry_run:
+                st.code(json.dumps(payload, ensure_ascii=False, indent=2))
+                ok = True
+                msg = "(dry-run)"
+            else:
+                ok, msg = post_manual_entry(payload)
+
+            if ok:
+                ok_count += 1
+            else:
+                errors.append({"row": i, "error": msg, "payload": payload})
+
+            progress.progress(i / n)
+
+        st.success(f"Done: {ok_count}/{n} successful.")
+        if errors:
+            with st.expander("Show errors"):
+                for e in errors:
+                    st.write(f"Row {e['row']}: {e['error']}")
+                    st.code(json.dumps(e["payload"], ensure_ascii=False, indent=
