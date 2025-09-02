@@ -63,7 +63,7 @@ REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
 SCOPES = _get(
     "BEXIO_SCOPES",
-    "openid profile offline_access accounting contact_edit kb_invoice_edit bank_payment_edit",
+    "openid profile email offline_access",
 )
 
 
@@ -73,9 +73,10 @@ if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIE
     st.error("Missing BEXIO_CLIENT_ID / BEXIO_CLIENT_SECRET. Fill the HARDCODED_* values or set Streamlit secrets.")
     st.stop()
 
-# OIDC discovery on the new issuer (https://idp.bexio.com)
-OIDC_ISSUER = _get("BEXIO_OIDC_ISSUER", "https://idp.bexio.com")
-DISCOVERY_URL = f"{OIDC_ISSUER}/.well-known/openid-configuration"
+# OIDC discovery on the current issuer (https://auth.bexio.com)
+OIDC_ISSUER = _get("BEXIO_OIDC_ISSUER", "https://auth.bexio.com")
+DISCOVERY_URL = f"{OIDC_ISSUER}/.well-known/openid-configuration")
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _discover_oidc() -> Dict[str, str]:
@@ -490,7 +491,8 @@ def _fetch_currency_map() -> Dict[str, int]:
 # Connect to bexio UI
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.header("Connect to bexio (idp.bexio.com)")
+st.header("Connect to bexio (auth.bexio.com)")
+
 
 with st.expander("OAuth debug"):
     st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
