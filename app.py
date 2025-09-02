@@ -108,11 +108,19 @@ MANUAL_ENTRY_ENDPOINT = _get("BEXIO_MANUAL_ENTRY_ENDPOINT", "/accounting/manual_
 st.set_page_config(page_title="Bank ↦ Ledger (+ Excel editor + bexio)", layout="wide")
 st.title("Bank Statement → Ledger CSV · Excel editor · bexio posting")
 
+
 # init editor/posting state
 if "ledger_df" not in st.session_state:
     st.session_state["ledger_df"] = None
 if "editor_df" not in st.session_state:
     st.session_state["editor_df"] = None
+
+# PAT storage: { "Company name": "token" }
+if "pat_store" not in st.session_state:
+    st.session_state["pat_store"] = {}
+if "pat_active_key" not in st.session_state:
+    st.session_state["pat_active_key"] = None  # currently selected company key
+
 
 BANKS   = ["PostFinance", "Raiffeisen"]
 CLIENTS = ["DB Financial", "Example AG", "Other Ltd"]
@@ -316,7 +324,7 @@ def _refresh_token_if_needed():
     else:
         st.warning(f"Token refresh failed: {r.status_code} {r.text}")
 
-def _auth_link() -> str:
+def _auth_link(force_login: bool = False) -> str:
     from urllib.parse import urlencode
     params = {
         "response_type": "code",
@@ -325,7 +333,13 @@ def _auth_link() -> str:
         "scope": SCOPES,
         "state": str(int(time.time())),
     }
+    if force_login:
+        params["prompt"] = "login"  # forces account/company re-pick
     return f"{AUTH_URL}?{urlencode(params)}"
+
+
+
+
 
 def _exchange_code_for_token(code: str) -> bool:
     data = {"grant_type": "authorization_code", "code": code, "redirect_uri": REDIRECT_URI}
@@ -345,8 +359,19 @@ def _exchange_code_for_token(code: str) -> bool:
     return False
 
 def _api_headers() -> Dict[str, str]:
+    """Prefer PAT if one is selected; otherwise use OAuth access token."""
+    active_key = st.session_state.get("pat_active_key")
+    if active_key:
+        pat = st.session_state["pat_store"].get(active_key)
+        if pat:
+            return {"Accept": "application/json", "Authorization": f"Bearer {pat}"}
+
+    # OAuth fallback
     _refresh_token_if_needed()
-    tok: Token = st.session_state["bexio_token"]
+    tok: Token = st.session_state.get("bexio_token")  # may be None
+    if not tok:
+        # No PAT and no OAuth token yet
+        return {"Accept": "application/json"}
     return {"Accept": "application/json", "Authorization": f"Bearer {tok.access_token}"}
 
 def get_userinfo() -> Optional[Dict]:
@@ -364,22 +389,27 @@ def get_userinfo() -> Optional[Dict]:
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.header("Connect to bexio (auth.bexio.com)")
+
 with st.expander("OAuth debug"):
     st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
-    st.code(_auth_link())  # shows full authorize URL so you can verify redirect_uri
+    st.code(_auth_link())  # verify redirect_uri in the URL
 
 cols = st.columns([1, 1, 2])
-with cols[1]:
-    qp = st.query_params
-    code = qp.get("code")
-    if isinstance(code, list):  # defensive for older Streamlit versions
-        code = code[0]
-    if code and not _token_valid():
-        if _exchange_code_for_token(code):
-            st.query_params.clear()  # remove ?code=...
-            st.rerun()
 
+# LEFT: OAuth connect / current user info
+with cols[0]:
+    if not _token_valid():
+        st.link_button("🔗 Connect to bexio (OAuth)", _auth_link())
+    else:
+        st.success("Connected via OAuth")
+        info = get_userinfo() or {}
+        email = info.get("email") or info.get("preferred_username")
+        st.caption(f"Logged in as: {email or '—'}")
+        st.link_button("Switch company (re-login)", _auth_link(force_login=True))
+    st.caption(f"Issuer: {ISSUER}")
+    st.caption(f"Redirect: {REDIRECT_URI}")
 
+# MIDDLE: handle OAuth return (?code=...)
 with cols[1]:
     qp = st.query_params
     code = qp.get("code")
@@ -387,14 +417,39 @@ with cols[1]:
         code = code[0]
     if code and not _token_valid():
         if _exchange_code_for_token(code):
-            st.query_params.clear()  # remove ?code=...
+            st.query_params.clear()
             st.rerun()
 
+# RIGHT: Personal Access Tokens (optional multi-company dropdown)
 with cols[2]:
-    st.write(
-        "If you manage multiple companies/mandates, authorize this app for each company separately.\n"
-        "The access token returned by bexio is tied to the company you authorize."
-    )
+    st.subheader("Or use Personal Access Tokens")
+    with st.form("pat_add_form", clear_on_submit=True):
+        new_company = st.text_input("Company label (free text)", placeholder="e.g., DB Financial AG")
+        new_pat = st.text_input("PAT (paste token)", type="password")
+        submitted = st.form_submit_button("Add/Update PAT")
+        if submitted:
+            if new_company and new_pat:
+                st.session_state["pat_store"][new_company] = new_pat.strip()
+                st.session_state["pat_active_key"] = new_company
+                st.success(f"Saved PAT for {new_company}")
+            else:
+                st.error("Please enter both company label and token.")
+
+    if st.session_state["pat_store"]:
+        keys = list(st.session_state["pat_store"].keys())
+        sel = st.selectbox("Active company (PAT)", keys,
+                           index=keys.index(st.session_state["pat_active_key"]) if st.session_state["pat_active_key"] in keys else 0)
+        st.session_state["pat_active_key"] = sel
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("Disable PAT (use OAuth)", key="disable_pat"):
+                st.session_state["pat_active_key"] = None
+        with col_b:
+            if st.button("Remove selected PAT"):
+                st.session_state["pat_store"].pop(sel, None)
+                st.session_state["pat_active_key"] = None
+    else:
+        st.caption("Add one PAT per company to post without OAuth. PATs are stored only in this session.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Posting to bexio – build payloads and send
