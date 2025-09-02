@@ -115,12 +115,6 @@ if "ledger_df" not in st.session_state:
 if "editor_df" not in st.session_state:
     st.session_state["editor_df"] = None
 
-# PAT storage: { "Company name": "token" }
-if "pat_store" not in st.session_state:
-    st.session_state["pat_store"] = {}
-if "pat_active_key" not in st.session_state:
-    st.session_state["pat_active_key"] = None  # currently selected company key
-
 
 BANKS   = ["PostFinance", "Raiffeisen"]
 CLIENTS = ["DB Financial", "Example AG", "Other Ltd"]
@@ -337,12 +331,10 @@ def _auth_link(force_login: bool = False) -> str:
         params["prompt"] = "login"  # forces account/company re-pick
     return f"{AUTH_URL}?{urlencode(params)}"
 
-def _has_pat() -> bool:
-    k = st.session_state.get("pat_active_key")
-    return bool(k and st.session_state["pat_store"].get(k))
 
 def _is_authenticated() -> bool:
-    return _token_valid() or _has_pat()
+    return _token_valid()
+
 
 
 
@@ -378,12 +370,13 @@ def _exchange_code_for_token(code: str) -> bool:
 
 
 def _api_headers() -> Dict[str, str]:
-    """Prefer PAT if one is selected; otherwise use OAuth access token."""
-    active_key = st.session_state.get("pat_active_key")
-    if active_key:
-        pat = st.session_state["pat_store"].get(active_key)
-        if pat:
-            return {"Accept": "application/json", "Authorization": f"Bearer {pat}"}
+    _refresh_token_if_needed()
+    headers = {"Accept": "application/json"}
+    tok: Optional[Token] = st.session_state.get("bexio_token")
+    if tok and tok.access_token and time.time() < tok.expires_at:
+        headers["Authorization"] = f"Bearer {tok.access_token}"
+    return headers
+
 
     # OAuth fallback
     _refresh_token_if_needed()
@@ -411,12 +404,11 @@ st.header("Connect to bexio (idp.bexio.com)")
 
 with st.expander("OAuth debug"):
     st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
-    st.code(_auth_link())  # verify redirect_uri in the URL
+    st.code(_auth_link())  # verify redirect_uri
 
-cols = st.columns([1, 1, 2])
+left, right = st.columns([1, 1])
 
-# LEFT: OAuth connect / current user info
-with cols[0]:
+with left:
     if not _token_valid():
         st.link_button("🔗 Connect to bexio (OAuth)", _auth_link())
     else:
@@ -428,8 +420,7 @@ with cols[0]:
     st.caption(f"Issuer: {ISSUER}")
     st.caption(f"Redirect: {REDIRECT_URI}")
 
-# MIDDLE: handle OAuth return (?code=...)
-with cols[1]:
+with right:
     qp = st.query_params
     code = qp.get("code")
     if isinstance(code, list):
@@ -438,44 +429,6 @@ with cols[1]:
         if _exchange_code_for_token(code):
             st.query_params.clear()
             st.rerun()
-
-# RIGHT: Personal Access Tokens (optional multi-company dropdown)
-with cols[2]:
-    st.subheader("Or use Personal Access Tokens")
-    with st.form("pat_add_form", clear_on_submit=True):
-        new_company = st.text_input("Company label (free text)", placeholder="e.g., DB Financial AG")
-        new_pat = st.text_input("PAT (paste token)", type="password")
-        submitted = st.form_submit_button("Add/Update PAT")
-        if submitted:
-            if new_company and new_pat:
-                st.session_state["pat_store"][new_company] = new_pat.strip()
-                st.session_state["pat_active_key"] = new_company
-                st.success(f"Saved PAT for {new_company}")
-            else:
-                st.error("Please enter both company label and token.")
-
-    if st.session_state["pat_store"]:
-        keys = list(st.session_state["pat_store"].keys())
-        sel = st.selectbox("Active company (PAT)", keys,
-                           index=keys.index(st.session_state["pat_active_key"]) if st.session_state["pat_active_key"] in keys else 0)
-        st.session_state["pat_active_key"] = sel
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("Disable PAT (use OAuth)", key="disable_pat"):
-                st.session_state["pat_active_key"] = None
-        with col_b:
-            if st.button("Remove selected PAT"):
-                st.session_state["pat_store"].pop(sel, None)
-                st.session_state["pat_active_key"] = None
-    else:
-        st.caption("Add one PAT per company to post without OAuth. PATs are stored only in this session.")
-
-# Enable the button when PAT or OAuth is available (or always in dry-run)
-disabled = (not _is_authenticated()) and (not dry_run)
-if st.button("Post to bexio now", disabled=disabled):
-    if not dry_run and not _is_authenticated():
-        st.error("Please connect to bexio first (OAuth or PAT).")
-        st.stop()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -495,7 +448,7 @@ if not sources:
 else:
     choice = st.radio("Source", list(sources.keys()), horizontal=True)
     df_src = sources[choice]
-    st.dataframe(df_src.head(10), width="stretch")  # replace use_container_width
+    st.dataframe(df_src.head(10), width="stretch")  # use new API
 
     col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
@@ -505,11 +458,11 @@ else:
     with col3:
         st.caption("Tip: start with Dry run to validate payloads.")
 
-    # Enable the button when PAT or OAuth is available (or always in dry-run)
+    # Button enabled if authenticated or you're in dry-run
     disabled = (not _is_authenticated()) and (not dry_run)
     if st.button("Post to bexio now", disabled=disabled):
         if not dry_run and not _is_authenticated():
-            st.error("Please connect to bexio first (OAuth or PAT).")
+            st.error("Please connect to bexio first (OAuth).")
             st.stop()
 
         n = min(len(df_src), int(row_limit))
@@ -540,11 +493,10 @@ else:
                     st.write(f"Row {e['row']}: {e['error']}")
                     st.code(json.dumps(e["payload"], ensure_ascii=False, indent=2))
 
-
 def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
-    headers = _api_headers()  # picks PAT first, else OAuth
+    headers = _api_headers()  # OAuth only now
     if "Authorization" not in headers:
-        return False, "Not authenticated (OAuth or PAT missing)"
+        return False, "Not authenticated (OAuth missing)"
     url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     if r.ok:
