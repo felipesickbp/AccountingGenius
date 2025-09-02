@@ -397,7 +397,6 @@ def get_userinfo() -> Optional[Dict]:
         st.warning(f"userinfo failed: {e}")
     return None
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Connect to bexio UI
 # ──────────────────────────────────────────────────────────────────────────────
@@ -405,15 +404,17 @@ st.markdown("---")
 st.header("Connect to bexio (auth.bexio.com)")
 
 cols = st.columns([1, 1, 2])
+
 with cols[0]:
     if not _token_valid():
         st.link_button("🔗 Connect to bexio", _auth_link())
-st.caption(f"Issuer: {ISSUER}")
     else:
         st.success("Connected to bexio")
         info = get_userinfo() or {}
         email = info.get("email") or info.get("preferred_username")
         st.caption(f"Logged in as: {email or '—'}")
+    # keep caption inside the same block as the if/else
+    st.caption(f"Issuer: {ISSUER}")
 
 with cols[1]:
     code = st.experimental_get_query_params().get("code", [None])[0]
@@ -427,6 +428,7 @@ with cols[2]:
         "If you manage multiple companies/mandates, authorize this app for each company separately.\n"
         "The access token returned by bexio is tied to the company you authorize."
     )
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Posting to bexio – map rows → manual entry payloads
