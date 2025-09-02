@@ -337,26 +337,26 @@ def _auth_link(force_login: bool = False) -> str:
         params["prompt"] = "login"  # forces account/company re-pick
     return f"{AUTH_URL}?{urlencode(params)}"
 
+def _has_pat() -> bool:
+    k = st.session_state.get("pat_active_key")
+    return bool(k and st.session_state["pat_store"].get(k))
 
+def _is_authenticated() -> bool:
+    return _token_valid() or _has_pat()
 
 
 
 def _exchange_code_for_token(code: str) -> bool:
-    data = {"grant_type": "authorization_code", "code": code, "redirect_uri": REDIRECT_URI}
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+    }
     try:
-        r = requests.post(TOKEN_URL, data=data, auth=(CLIENT_ID, CLIENT_SECRET), timeout=30)
-    except Exception as e:
-        st.error(f"OAuth exchange failed: {e}")
-        return False
-    if r.ok:
-        _save_token(r.json())
-        return True
-    try:
-        err = r.json()
-    except Exception:
-        err = {"error": r.text}
-    st.error(f"OAuth exchange failed: {r.status_code} {err}")
-    return False
+        r = requests.post(TOKEN_URL, data=data, timeout=30)
+
 
 def _api_headers() -> Dict[str, str]:
     """Prefer PAT if one is selected; otherwise use OAuth access token."""
@@ -388,7 +388,7 @@ def get_userinfo() -> Optional[Dict]:
 # Connect to bexio UI
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.header("Connect to bexio (auth.bexio.com)")
+st.header("Connect to bexio (idp.bexio.com)")
 
 with st.expander("OAuth debug"):
     st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
@@ -451,6 +451,14 @@ with cols[2]:
     else:
         st.caption("Add one PAT per company to post without OAuth. PATs are stored only in this session.")
 
+# Enable the button when PAT or OAuth is available (or always in dry-run)
+disabled = (not _is_authenticated()) and (not dry_run)
+if st.button("Post to bexio now", disabled=disabled):
+    if not dry_run and not _is_authenticated():
+        st.error("Please connect to bexio first (OAuth or PAT).")
+        st.stop()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Posting to bexio – build payloads and send
 # ──────────────────────────────────────────────────────────────────────────────
@@ -487,14 +495,15 @@ def row_to_manual_entry(row: pd.Series) -> Dict:
     return payload
 
 def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
-    if not _token_valid():
-        return False, "Not connected to bexio"
-    headers = _api_headers()
+    headers = _api_headers()  # chooses PAT first, else OAuth
+    if "Authorization" not in headers:
+        return False, "Not authenticated (OAuth or PAT missing)"
     url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     if r.ok:
         return True, r.text
     return False, f"{r.status_code}: {r.text}"
+
 
 # Choose source for posting
 st.markdown("---")
