@@ -119,7 +119,7 @@ if "editor_df" not in st.session_state:
 
 
 BANKS   = ["PostFinance", "Raiffeisen"]
-CLIENTS = ["DB Financial", "Example AG", "Other Ltd"]
+CLIENTS = ["DB Financial", "Kuhn Dienstleistungen", "Elixavita Carelife GmbH", "Other Ltd"]
 
 left, right = st.columns([1, 1])
 with left:
