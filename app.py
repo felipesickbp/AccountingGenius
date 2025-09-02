@@ -63,8 +63,10 @@ REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
 SCOPES = _get(
     "BEXIO_SCOPES",
-    "openid profile offline_access contact_edit kb_invoice_edit bank_payment_edit",
+    "openid profile offline_access accounting contact_edit kb_invoice_edit bank_payment_edit",
 )
+
+
 
 # Fail fast if empty or still placeholders
 if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIENT_ID, CLIENT_SECRET)):
@@ -378,14 +380,6 @@ def _api_headers() -> Dict[str, str]:
     return headers
 
 
-    # OAuth fallback
-    _refresh_token_if_needed()
-    tok: Token = st.session_state.get("bexio_token")  # may be None
-    if not tok:
-        # No PAT and no OAuth token yet
-        return {"Accept": "application/json"}
-    return {"Accept": "application/json", "Authorization": f"Bearer {tok.access_token}"}
-
 def get_userinfo() -> Optional[Dict]:
     try:
         headers = _api_headers()
@@ -395,6 +389,55 @@ def get_userinfo() -> Optional[Dict]:
     except Exception as e:
         st.warning(f"userinfo failed: {e}")
     return None
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Accounting API v3 helpers (lookups + base path)
+# ──────────────────────────────────────────────────────────────────────────────
+ACCOUNTING_BASE = "https://api.bexio.com/3.0/accounting"
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_accounts_map() -> Dict[str, int]:
+    """Map account number (e.g., '1020') -> account id (int)."""
+    url = f"{ACCOUNTING_BASE}/accounts"
+    r = requests.get(url, headers=_api_headers(), timeout=30)
+    r.raise_for_status()
+    data = r.json() or []
+    m: Dict[str, int] = {}
+    for a in data:
+        nr = str(a.get("account_nr") or "").strip()
+        if nr and "id" in a:
+            m[nr] = int(a["id"])
+    return m
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_currency_map() -> Dict[str, int]:
+    """
+    Map currency code (e.g., 'CHF') -> currency id (int).
+    Try v3 first, then v2 fallback; default to CHF=1 if unknown.
+    """
+    headers = _api_headers()
+    # v3
+    try:
+        r = requests.get("https://api.bexio.com/3.0/currencies", headers=headers, timeout=30)
+        if r.ok:
+            data = r.json() or []
+            m = { (c.get("code") or "").strip(): int(c["id"]) for c in data if c.get("id") }
+            if m:
+                return m
+    except Exception:
+        pass
+    # v2 fallback
+    try:
+        r2 = requests.get("https://api.bexio.com/2.0/currency", headers=headers, timeout=30)
+        if r2.ok:
+            data2 = r2.json() or []
+            m2 = { (c.get("name") or "").strip(): int(c["id"]) for c in data2 if c.get("id") }
+            if m2:
+                return m2
+    except Exception:
+        pass
+    return {"CHF": 1}
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Connect to bexio UI
@@ -429,55 +472,83 @@ with right:
         if _exchange_code_for_token(code):
             st.query_params.clear()
             st.rerun()
-def row_to_manual_entry(row: pd.Series) -> Dict:
-    """Map our template row to a bexio manual entry payload."""
+def row_to_manual_entry(row: pd.Series,
+                        accounts_map: Dict[str, int],
+                        currency_map: Dict[str, int]) -> Tuple[Optional[Dict], Optional[str]]:
+    """
+    Build payload for POST /3.0/accounting/manual_entries (v3 shape).
+    Returns (payload, error_message_if_any).
+    """
+    # Date
     date_str = str(row.get("Datum", "")).strip()
     try:
-        dt_iso = datetime.strptime(date_str, "%d.%m.%Y").date().isoformat() if date_str else None
+        date_iso = datetime.strptime(date_str, "%d.%m.%Y").date().isoformat() if date_str else None
     except Exception:
-        dt_iso = None
+        date_iso = None
 
-    amount = row.get("Betrag", "")
+    # Amount (absolute)
+    amount_raw = row.get("Betrag", "")
     try:
-        amount_f = float(str(amount).replace("'", "").replace(",", ".")) if amount != "" else 0.0
+        amount_f = float(str(amount_raw).replace("'", "").replace(",", ".")) if amount_raw != "" else 0.0
     except Exception:
         amount_f = 0.0
     amount_abs = round(abs(amount_f), 2)
 
-    payload = {
-        "date": dt_iso,
-        "text": (str(row.get("Beschreibung", "")).strip() or None),
-        "currency_code": (str(row.get("Währung", "CHF")).strip() or "CHF"),
-        "exchange_rate": (str(row.get("Wechselkurs", "")).strip() or None),
-        "lines": [
-            {"account_id": str(row.get("Soll", "")).strip(),  "debit": amount_abs, "credit": 0.0},
-            {"account_id": str(row.get("Haben", "")).strip(), "debit": 0.0,        "credit": amount_abs},
+    # Accounts → ids
+    soll_nr  = str(row.get("Soll", "")).strip()
+    haben_nr = str(row.get("Haben", "")).strip()
+    debit_id  = accounts_map.get(soll_nr)
+    credit_id = accounts_map.get(haben_nr)
+    if not debit_id or not credit_id:
+        missing = []
+        if not debit_id:  missing.append(f"Soll '{soll_nr}'")
+        if not credit_id: missing.append(f"Haben '{haben_nr}'")
+        return None, "Unknown account number(s): " + ", ".join(missing)
+
+    # Currency → id
+    code = (str(row.get("Währung", "CHF")).strip() or "CHF")
+    currency_id = currency_map.get(code) or currency_map.get("CHF") or 1
+    # Exchange rate
+    fx = str(row.get("Wechselkurs", "")).strip()
+    try:
+        currency_factor = float(fx) if fx else 1.0
+    except Exception:
+        currency_factor = 1.0
+
+    desc = (str(row.get("Beschreibung", "")).strip() or None)
+    ref  = (str(row.get("Belegnummer", "")).strip() or None)
+
+    payload: Dict = {
+        "type": "manual_single_entry",
+        "date": date_iso,
+        "reference_nr": ref,
+        "entries": [
+            {
+                "debit_account_id":  int(debit_id),
+                "credit_account_id": int(credit_id),
+                "amount":            amount_abs,
+                "currency_id":       int(currency_id),
+                "currency_factor":   currency_factor,
+                "description":       desc,
+            }
         ],
-        "vat_code": (str(row.get("MWST Code", "")).strip() or None),
-        "vat_account": (str(row.get("MWST Konto", "")).strip() or None),
-        "external_reference": (str(row.get("Belegnummer", "")).strip() or None),
     }
-
-    def _clean(d: Dict) -> Dict:
-        return {k: v for k, v in d.items() if v not in (None, "", [])}
-    payload = _clean(payload)
-    payload["lines"] = [_clean(x) for x in payload.get("lines", [])]
-    return payload
-
+    return payload, None
 
 def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
-    headers = _api_headers()  # OAuth-only
+    headers = _api_headers()
     if "Authorization" not in headers:
         return False, "Not authenticated (OAuth missing)"
-    url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"
+    url = f"{ACCOUNTING_BASE}/manual_entries"  # v3 path
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     if r.ok:
         return True, r.text
     return False, f"{r.status_code}: {r.text}"
 
 
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Posting to bexio – build payloads and send (single section)
+# UI: Post rows to bexio (with dry-run)
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.header("Post rows to bexio (manual entries)")
@@ -493,7 +564,7 @@ if not sources:
 else:
     choice = st.radio("Source", list(sources.keys()), horizontal=True)
     df_src = sources[choice]
-    st.dataframe(df_src.head(10), width="stretch")  # Streamlit >= 1.37
+    st.dataframe(df_src.head(10), width="stretch")
 
     col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
@@ -503,12 +574,16 @@ else:
     with col3:
         st.caption("Tip: start with Dry run to validate payloads.")
 
-    # Enable the button if authenticated OR you're in dry-run
+    # Enable the button if authenticated OR dry-run
     disabled = (not _is_authenticated()) and (not dry_run)
     if st.button("Post to bexio now", disabled=disabled):
         if not dry_run and not _is_authenticated():
             st.error("Please connect to bexio first (OAuth).")
             st.stop()
+
+        # Lookups (only when needed)
+        accounts_map = _fetch_accounts_map() if not dry_run else {}
+        currency_map = _fetch_currency_map() if not dry_run else {"CHF": 1}
 
         n = min(len(df_src), int(row_limit))
         progress = st.progress(0.0)
@@ -516,17 +591,25 @@ else:
         errors = []
 
         for i, (_, row) in enumerate(df_src.head(n).iterrows(), start=1):
-            payload = row_to_manual_entry(row)
+            # Build payload in v3 shape
+            payload, err = row_to_manual_entry(row, accounts_map, currency_map)
+            if err:
+                errors.append({"row": i, "error": err, "payload": None})
+                progress.progress(i / n)
+                continue
+
             if dry_run:
                 st.code(json.dumps(payload, ensure_ascii=False, indent=2))
                 ok = True
+                msg = "(dry-run)"
             else:
                 ok, msg = post_manual_entry(payload)
-                if not ok:
-                    errors.append({"row": i, "error": msg, "payload": payload})
 
             if ok:
                 ok_count += 1
+            else:
+                errors.append({"row": i, "error": msg, "payload": payload})
+
             progress.progress(i / n)
 
         st.success(f"Done: {ok_count}/{n} successful.")
@@ -534,4 +617,5 @@ else:
             with st.expander("Show errors"):
                 for e in errors:
                     st.write(f"Row {e['row']}: {e['error']}")
-                    st.code(json.dumps(e["payload"], ensure_ascii=False, indent=2))
+                    if e["payload"] is not None:
+                        st.code(json.dumps(e["payload"], ensure_ascii=False, indent=2))
