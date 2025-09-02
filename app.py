@@ -74,7 +74,7 @@ if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIE
 
 # OIDC discovery on the current issuer (https://auth.bexio.com)
 OIDC_ISSUER = _get("BEXIO_OIDC_ISSUER", "https://auth.bexio.com")
-DISCOVERY_URL = f"{OIDC_ISSUER}/.well-known/openid-configuration")
+DISCOVERY_URL = f"{OIDC_ISSUER}/.well-known/openid-configuration"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
