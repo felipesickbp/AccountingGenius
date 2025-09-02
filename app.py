@@ -399,61 +399,84 @@ ACCOUNTING_BASE = "https://api.bexio.com/3.0/accounting"
 def _fetch_accounts_map() -> Dict[str, int]:
     """
     Map account number (e.g., '1020') -> account id (int).
-    - Follows pagination via RFC5988 Link header (rel="next")
-    - Tolerates different field names (account_nr, number, account_number)
-    - Normalizes numbers (trim, remove NBSP/whitespace, drop leading zeros variant)
+    - Tries multiple endpoints (v3 primary, then fallbacks)
+    - No raise_for_status; stores diagnostics in session for the UI
+    - Normalizes account numbers; tolerates field name variants
     """
     import re
 
     def _norm(n: str) -> str:
-        # strip spaces (incl. non-breaking), keep digits; typical CH charts have no leading zeros
-        s = re.sub(r"\s+", "", str(n or "")).replace("\u00A0", "").strip()
-        return s
-
-    def _norm_both_keys(n: str):
-        # return both the raw-normalized and a "no-leading-zeros" variant for matching
-        raw = _norm(n)
-        no0 = raw.lstrip("0") if raw else raw
-        return {raw, no0} if raw != no0 and no0 else {raw}
+        return re.sub(r"\s+", "", str(n or "")).replace("\u00A0", "").strip()
 
     headers = _api_headers()
-    url = f"{ACCOUNTING_BASE}/accounts"
-    all_rows = []
 
-    def _next_from_link(link_header: Optional[str]) -> Optional[str]:
-        if not link_header:
-            return None
-        # Example: <https://.../accounts?page=2>; rel="next", <...>; rel="last"
-        for part in link_header.split(","):
-            seg = part.strip()
-            if 'rel="next"' in seg:
-                start = seg.find("<") + 1
-                end = seg.find(">", start)
-                if start > 0 and end > start:
-                    return seg[start:end]
-        return None
+    candidates = [
+        "https://api.bexio.com/3.0/accounting/accounts",  # preferred
+        "https://api.bexio.com/3.0/accounts",             # fallback guess
+        "https://api.bexio.com/2.0/accounting/accounts",  # legacy guess
+        "https://api.bexio.com/2.0/accounts",             # legacy guess
+    ]
 
-    # pull all pages
-    while url:
-        r = requests.get(url, headers=headers, timeout=30)
-        r.raise_for_status()
-        chunk = r.json() or []
-        if not isinstance(chunk, list):
-            # some APIs return {data:[...]} — be defensive
-            chunk = chunk.get("data", [])
-        all_rows.extend(chunk)
-        url = _next_from_link(r.headers.get("Link"))
+    tried = []
+    last_errors = []
+    parsed_any = {}
 
-    # build map with tolerant keys
-    m: Dict[str, int] = {}
-    for a in all_rows:
-        nr = a.get("account_nr") or a.get("number") or a.get("account_number")
-        aid = a.get("id")
-        if nr and aid:
-            for key in _norm_both_keys(nr):
-                if key:  # last one wins is fine
-                    m[str(key)] = int(aid)
-    return m
+    for url in candidates:
+        try:
+            r = requests.get(url, headers=headers, timeout=30)
+            tried.append((url, r.status_code))
+            if not r.ok:
+                # collect a short error message for the UI
+                txt = (r.text or "")[:300].replace("\n", " ").strip()
+                last_errors.append(f"{url} -> {r.status_code} {txt}")
+                continue
+
+            data = r.json() or []
+            # Some APIs return {"data":[...]} — be defensive:
+            if isinstance(data, dict) and "data" in data:
+                data = data["data"]
+
+            if not isinstance(data, list):
+                last_errors.append(f"{url} -> ok but unexpected shape")
+                continue
+
+            m: Dict[str, int] = {}
+            for a in data:
+                # Try common field names:
+                nr = a.get("account_nr") or a.get("number") or a.get("account_number")
+                aid = a.get("id")
+                if nr and aid:
+                    key = _norm(nr)
+                    if key:
+                        m[key] = int(aid)
+                        # also store no-leading-zeros variant
+                        no0 = key.lstrip("0")
+                        if no0 and no0 != key:
+                            m[no0] = int(aid)
+
+            if m:
+                parsed_any = m
+                st.session_state["accounts_fetch_debug"] = {
+                    "used_endpoint": url,
+                    "count": len(m),
+                    "tried": tried,
+                    "errors": last_errors[-3:],
+                }
+                return m
+            else:
+                last_errors.append(f"{url} -> ok but empty/parsable=0")
+        except Exception as e:
+            last_errors.append(f"{url} -> exception: {e}")
+
+    # If we got here, everything failed
+    st.session_state["accounts_fetch_debug"] = {
+        "used_endpoint": None,
+        "count": 0,
+        "tried": tried,
+        "errors": last_errors[-5:],
+    }
+    return {}
+
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
