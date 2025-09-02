@@ -53,8 +53,8 @@ def _get(name: str, default: Optional[str] = None):
 
 # Fill these via Streamlit Cloud → Settings → Secrets.
 # If you really want to hardcode, replace the placeholders below.
-CLIENT_ID     = _get("BEXIO_CLIENT_ID",     "bc3d501e-bbfb-4d6f-ae59-6f93629cbe0f")
-CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", "c6PO3_UaWnNHNkmm3f1dwO7QepW_h0FCW3ReepxN0OS4ojvWpaYWosbthiNYZuxw5w7W8zrMgEi0kO5Di6E3lQ")
+CLIENT_ID     = _get("bc3d501e-bbfb-4d6f-ae59-6f93629cbe0f",     "bc3d501e-bbfb-4d6f-ae59-6f93629cbe0f")
+CLIENT_SECRET = _get("c6PO3_UaWnNHNkmm3f1dwO7QepW_h0FCW3ReepxN0OS4ojvWpaYWosbthiNYZuxw5w7W8zrMgEi0kO5Di6E3lQ", "c6PO3_UaWnNHNkmm3f1dwO7QepW_h0FCW3ReepxN0OS4ojvWpaYWosbthiNYZuxw5w7W8zrMgEi0kO5Di6E3lQ")
 
 # IMPORTANT: this must match the Redirect URL configured in bexio dev portal EXACTLY
 REDIRECT_URI  = _get(
