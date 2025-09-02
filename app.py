@@ -564,4 +564,4 @@ else:
             with st.expander("Show errors"):
                 for e in errors:
                     st.write(f"Row {e['row']}: {e['error']}")
-                    st.code(json.dumps(e["payload"], ensure_ascii=False, indent=
+                    st.code(json.dumps(e["payload"], ensure_ascii=False, indent=2))
