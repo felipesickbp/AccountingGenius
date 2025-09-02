@@ -71,8 +71,8 @@ if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIE
     st.error("Missing BEXIO_CLIENT_ID / BEXIO_CLIENT_SECRET. Fill the HARDCODED_* values or set Streamlit secrets.")
     st.stop()
 
-# OIDC discovery on the new issuer (auth.bexio.com)
-OIDC_ISSUER = _get("BEXIO_OIDC_ISSUER", "https://auth.bexio.com")
+# OIDC discovery on the new issuer (https://idp.bexio.com)
+OIDC_ISSUER = _get("BEXIO_OIDC_ISSUER", "https://idp.bexio.com")
 DISCOVERY_URL = f"{OIDC_ISSUER}/.well-known/openid-configuration"
 
 @st.cache_data(ttl=3600, show_spinner=False)
