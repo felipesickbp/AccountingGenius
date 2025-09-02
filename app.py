@@ -44,17 +44,37 @@ except Exception:
     raiffeisen_transform = None  # type: ignore
 
 # ──────────────────────────────────────────────────────────────────────────────
-# OAuth / API config (auth.bexio.com + OIDC discovery)
+# OAuth / API config (auth.bexio.com + OIDC discovery)  ✅ production-safe
 # ──────────────────────────────────────────────────────────────────────────────
-CLIENT_ID = os.getenv("BEXIO_CLIENT_ID", "bc3d501e-bbfb-4d6f-ae59-6f93629cbe0f")
-CLIENT_SECRET = os.getenv("BEXIO_CLIENT_SECRET", "c6PO3_UaWnNHNkmm3f1dwO7QepW_h0FCW3ReepxN0OS4ojvWpaYWosbthiNYZuxw5w7W8zrMgEi0kO5Di6E3lQ")
-REDIRECT_URI = os.getenv("BEXIO_REDIRECT_URI", "http://localhost:8501")  # must match bexio app
-SCOPES = os.getenv(
+
+# Helper: prefer Streamlit Secrets, then env vars, then explicit fallback
+def _get(name: str, default: Optional[str] = None):
+    return st.secrets.get(name, os.getenv(name, default))
+
+# Fill these via Streamlit Cloud → Settings → Secrets.
+# If you really want to hardcode, replace the placeholders below.
+CLIENT_ID     = _get("BEXIO_CLIENT_ID",     "bc3d501e-bbfb-4d6f-ae59-6f93629cbe0f")
+CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", "c6PO3_UaWnNHNkmm3f1dwO7QepW_h0FCW3ReepxN0OS4ojvWpaYWosbthiNYZuxw5w7W8zrMgEi0kO5Di6E3lQ")
+
+# IMPORTANT: this must match the Redirect URL configured in bexio dev portal EXACTLY
+REDIRECT_URI  = _get(
+    "BEXIO_REDIRECT_URI",
+    "https://accountinggenius-mdcq7sh8scyxglc7vvwcuh.streamlit.app"
+)
+
+SCOPES = _get(
     "BEXIO_SCOPES",
     "openid profile offline_access contact_edit kb_invoice_edit bank_payment_edit",
 )
 
-OIDC_ISSUER = os.getenv("BEXIO_OIDC_ISSUER", "https://auth.bexio.com")
+# Fail fast if still using placeholders
+if any(x in (None, "", "bc3d501e-bbfb-4d6f-ae59-6f93629cbe0f", "c6PO3_UaWnNHNkmm3f1dwO7QepW_h0FCW3ReepxN0OS4ojvWpaYWosbthiNYZuxw5w7W8zrMgEi0kO5Di6E3lQ")
+       for x in (CLIENT_ID, CLIENT_SECRET)):
+    st.error("Missing BEXIO_CLIENT_ID / BEXIO_CLIENT_SECRET. Set Streamlit secrets or replace placeholders.")
+    st.stop()
+
+# OIDC discovery on the new issuer (auth.bexio.com)
+OIDC_ISSUER = _get("BEXIO_OIDC_ISSUER", "https://auth.bexio.com")
 DISCOVERY_URL = f"{OIDC_ISSUER}/.well-known/openid-configuration"
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -65,22 +85,23 @@ def _discover_oidc() -> Dict[str, str]:
             return r.json()
     except Exception:
         pass
-    # fallback
+    # fallback if discovery is unavailable
     return {
         "authorization_endpoint": f"{OIDC_ISSUER}/authorize",
-        "token_endpoint": f"{OIDC_ISSUER}/token",
-        "userinfo_endpoint": f"{OIDC_ISSUER}/userinfo",
-        "issuer": OIDC_ISSUER,
+        "token_endpoint":         f"{OIDC_ISSUER}/token",
+        "userinfo_endpoint":      f"{OIDC_ISSUER}/userinfo",
+        "issuer":                  OIDC_ISSUER,
     }
 
-_oidc = _discover_oidc()
-AUTH_URL = _oidc.get("authorization_endpoint")
-TOKEN_URL = _oidc.get("token_endpoint")
+_oidc        = _discover_oidc()
+AUTH_URL     = _oidc.get("authorization_endpoint")
+TOKEN_URL    = _oidc.get("token_endpoint")
 USERINFO_URL = _oidc.get("userinfo_endpoint")
-ISSUER = _oidc.get("issuer", OIDC_ISSUER)
+ISSUER       = _oidc.get("issuer", OIDC_ISSUER)
 
-API_BASE = os.getenv("BEXIO_API_BASE", "https://api.bexio.com/2.0")
-MANUAL_ENTRY_ENDPOINT = os.getenv("BEXIO_MANUAL_ENTRY_ENDPOINT", "/accounting/manual_entries")
+API_BASE = _get("BEXIO_API_BASE", "https://api.bexio.com/2.0")
+MANUAL_ENTRY_ENDPOINT = _get("BEXIO_MANUAL_ENTRY_ENDPOINT", "/accounting/manual_entries")
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Streamlit page + state
@@ -230,6 +251,8 @@ if data_file and st.button("Process bank statement → ledger"):
 st.markdown("---")
 st.header("Editable grid")
 
+
+
 if st.session_state["editor_df"] is None:
     st.info("Process a bank file above, or load a CSV/XLSX below.")
 else:
@@ -342,18 +365,21 @@ def get_userinfo() -> Optional[Dict]:
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.header("Connect to bexio (auth.bexio.com)")
+with st.expander("OAuth debug"):
+    st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
+    st.code(_auth_link())  # shows full authorize URL so you can verify redirect_uri
 
 cols = st.columns([1, 1, 2])
-with cols[0]:
-    if not _token_valid():
-        st.link_button("🔗 Connect to bexio", _auth_link())
-    else:
-        st.success("Connected to bexio")
-        info = get_userinfo() or {}
-        email = info.get("email") or info.get("preferred_username")
-        st.caption(f"Logged in as: {email or '—'}")
-    st.caption(f"Issuer: {ISSUER}")
-    st.caption(f"Using redirect: {REDIRECT_URI}")
+with cols[1]:
+    qp = st.query_params
+    code = qp.get("code")
+    if isinstance(code, list):  # defensive for older Streamlit versions
+        code = code[0]
+    if code and not _token_valid():
+        if _exchange_code_for_token(code):
+            st.query_params.clear()  # remove ?code=...
+            st.rerun()
+
 
 with cols[1]:
     qp = st.query_params
