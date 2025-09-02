@@ -484,24 +484,22 @@ def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
 
 # UI – choose a dataframe to post (edited grid or processed ledger)
 post_source = None
-if "grid_csv" in st.session_state:
-    # from data_editor; resolved by key used above
-    pass
 
-postable_tabs = st.tabs(["Use edited grid", "Use processed ledger (above)"])
-with postable_tabs[0]:
+tabs = st.tabs(["Use edited grid", "Use processed ledger (above)"])
+
+with tabs[0]:
     grid_df = None
     if up2 is not None:
-        # Retrieve latest grid data by the dynamic key used when rendering the editor
-        # Note: Streamlit stores edited data in session_state under the key we supplied.
-        key = f"grid_{(sheet_name or 'csv') if up2 is not None else 'csv'}"
-        grid_df = st.session_state.get(key)
-        if isinstance(grid_df, pd.DataFrame):
+        # key used in the editor above
+        editor_key = f"grid_{(sheet_name or 'csv') if up2 is not None else 'csv'}"
+        maybe_df = st.session_state.get(editor_key)
+        if isinstance(maybe_df, pd.DataFrame):
+            grid_df = maybe_df
             st.dataframe(grid_df.head(10), use_container_width=True)
     if grid_df is not None:
         post_source = ("grid", grid_df)
 
-with postable_tabs[1]:
+with tabs[1]:
     ledger_df = st.session_state.get("ledger_df")
     if isinstance(ledger_df, pd.DataFrame):
         st.dataframe(ledger_df.head(10), use_container_width=True)
@@ -511,26 +509,28 @@ with postable_tabs[1]:
 st.markdown("---")
 st.header("Post rows to bexio (manual entries)")
 
-col1, col2, col3 = st.columns([1,1,2])
+col1, col2, col3 = st.columns([1, 1, 2])
 with col1:
     dry_run = st.toggle("Dry run (don’t call API)", value=True)
 with col2:
     row_limit = st.number_input("Max rows", min_value=1, value=50, step=10)
 with col3:
-    st.caption("Tip: start with a small subset in Dry run to validate payloads.")
+    st.caption("Tip: start with Dry run to validate payloads.")
 
 if post_source is None:
     st.info("Load an edited grid or process a bank file first.")
 else:
     source_name, df_src = post_source
-    if st.button("Post to bexio now", disabled=not _token_valid() and not dry_run):
+    if st.button("Post to bexio now", disabled=(not _token_valid()) and (not dry_run)):
         if not dry_run and not _token_valid():
             st.error("Please connect to bexio first.")
             st.stop()
+
         n = min(len(df_src), int(row_limit))
-        progress = st.progress(0)
+        progress = st.progress(0.0)
         ok_count = 0
         errors = []
+
         for i, (_, row) in enumerate(df_src.head(n).iterrows(), start=1):
             payload = row_to_manual_entry(row)
             if dry_run:
@@ -539,28 +539,18 @@ else:
                 msg = "(dry-run)"
             else:
                 ok, msg = post_manual_entry(payload)
+
             if ok:
                 ok_count += 1
             else:
                 errors.append({"row": i, "error": msg, "payload": payload})
+
             progress.progress(i / n)
+
         st.success(f"Done: {ok_count}/{n} successful.")
         if errors:
             with st.expander("Show errors"):
                 for e in errors:
                     st.write(f"Row {e['row']}: {e['error']}")
                     st.code(json.dumps(e["payload"], ensure_ascii=False, indent=2))
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Footer / help
-# ──────────────────────────────────────────────────────────────────────────────
-st.markdown(
-    """
-    **Implementation notes**  
-    • The OAuth flow uses `idp.bexio.com`. After you create a bexio app, set its Redirect URI to your Streamlit app URL.  
-    • Tokens are stored in `st.session_state` and refreshed with `offline_access`.  
-    • The posting endpoint path can vary by API version. Check your tenant’s API docs and update `BEXIO_API_BASE` and `BEXIO_MANUAL_ENTRY_ENDPOINT`.  
-    • For multi-mandate usage, authorize one company at a time; tokens in bexio are scoped to the selected company during auth.  
-    """
-)
 
