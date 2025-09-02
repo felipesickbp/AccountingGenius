@@ -397,17 +397,64 @@ ACCOUNTING_BASE = "https://api.bexio.com/3.0/accounting"
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_accounts_map() -> Dict[str, int]:
-    """Map account number (e.g., '1020') -> account id (int)."""
+    """
+    Map account number (e.g., '1020') -> account id (int).
+    - Follows pagination via RFC5988 Link header (rel="next")
+    - Tolerates different field names (account_nr, number, account_number)
+    - Normalizes numbers (trim, remove NBSP/whitespace, drop leading zeros variant)
+    """
+    import re
+
+    def _norm(n: str) -> str:
+        # strip spaces (incl. non-breaking), keep digits; typical CH charts have no leading zeros
+        s = re.sub(r"\s+", "", str(n or "")).replace("\u00A0", "").strip()
+        return s
+
+    def _norm_both_keys(n: str):
+        # return both the raw-normalized and a "no-leading-zeros" variant for matching
+        raw = _norm(n)
+        no0 = raw.lstrip("0") if raw else raw
+        return {raw, no0} if raw != no0 and no0 else {raw}
+
+    headers = _api_headers()
     url = f"{ACCOUNTING_BASE}/accounts"
-    r = requests.get(url, headers=_api_headers(), timeout=30)
-    r.raise_for_status()
-    data = r.json() or []
+    all_rows = []
+
+    def _next_from_link(link_header: Optional[str]) -> Optional[str]:
+        if not link_header:
+            return None
+        # Example: <https://.../accounts?page=2>; rel="next", <...>; rel="last"
+        for part in link_header.split(","):
+            seg = part.strip()
+            if 'rel="next"' in seg:
+                start = seg.find("<") + 1
+                end = seg.find(">", start)
+                if start > 0 and end > start:
+                    return seg[start:end]
+        return None
+
+    # pull all pages
+    while url:
+        r = requests.get(url, headers=headers, timeout=30)
+        r.raise_for_status()
+        chunk = r.json() or []
+        if not isinstance(chunk, list):
+            # some APIs return {data:[...]} — be defensive
+            chunk = chunk.get("data", [])
+        all_rows.extend(chunk)
+        url = _next_from_link(r.headers.get("Link"))
+
+    # build map with tolerant keys
     m: Dict[str, int] = {}
-    for a in data:
-        nr = str(a.get("account_nr") or "").strip()
-        if nr and "id" in a:
-            m[nr] = int(a["id"])
+    for a in all_rows:
+        nr = a.get("account_nr") or a.get("number") or a.get("account_number")
+        aid = a.get("id")
+        if nr and aid:
+            for key in _norm_both_keys(nr):
+                if key:  # last one wins is fine
+                    m[str(key)] = int(aid)
     return m
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_currency_map() -> Dict[str, int]:
@@ -475,10 +522,22 @@ with right:
 def row_to_manual_entry(row: pd.Series,
                         accounts_map: Dict[str, int],
                         currency_map: Dict[str, int]) -> Tuple[Optional[Dict], Optional[str]]:
-    """
-    Build payload for POST /3.0/accounting/manual_entries (v3 shape).
-    Returns (payload, error_message_if_any).
-    """
+    import re
+
+    def _norm(n: str) -> str:
+        s = re.sub(r"\s+", "", str(n or "")).replace("\u00A0", "").strip()
+        return s
+
+    def _lookup(nr: str) -> Optional[int]:
+        # try raw, then no-leading-zeros
+        raw = _norm(nr)
+        if raw in accounts_map:
+            return accounts_map[raw]
+        no0 = raw.lstrip("0")
+        if no0 and no0 in accounts_map:
+            return accounts_map[no0]
+        return None
+
     # Date
     date_str = str(row.get("Datum", "")).strip()
     try:
@@ -486,7 +545,7 @@ def row_to_manual_entry(row: pd.Series,
     except Exception:
         date_iso = None
 
-    # Amount (absolute)
+    # Amount
     amount_raw = row.get("Betrag", "")
     try:
         amount_f = float(str(amount_raw).replace("'", "").replace(",", ".")) if amount_raw != "" else 0.0
@@ -495,20 +554,22 @@ def row_to_manual_entry(row: pd.Series,
     amount_abs = round(abs(amount_f), 2)
 
     # Accounts → ids
-    soll_nr  = str(row.get("Soll", "")).strip()
-    haben_nr = str(row.get("Haben", "")).strip()
-    debit_id  = accounts_map.get(soll_nr)
-    credit_id = accounts_map.get(haben_nr)
+    soll_nr  = str(row.get("Soll", "") or "")
+    haben_nr = str(row.get("Haben", "") or "")
+    if not soll_nr or not haben_nr:
+        return None, "Missing Soll/Haben account number(s)"
+
+    debit_id  = _lookup(soll_nr)
+    credit_id = _lookup(haben_nr)
     if not debit_id or not credit_id:
         missing = []
-        if not debit_id:  missing.append(f"Soll '{soll_nr}'")
-        if not credit_id: missing.append(f"Haben '{haben_nr}'")
+        if not debit_id:  missing.append(f"Soll '{soll_nr.strip()}'")
+        if not credit_id: missing.append(f"Haben '{haben_nr.strip()}'")
         return None, "Unknown account number(s): " + ", ".join(missing)
 
     # Currency → id
     code = (str(row.get("Währung", "CHF")).strip() or "CHF")
     currency_id = currency_map.get(code) or currency_map.get("CHF") or 1
-    # Exchange rate
     fx = str(row.get("Wechselkurs", "")).strip()
     try:
         currency_factor = float(fx) if fx else 1.0
@@ -534,6 +595,7 @@ def row_to_manual_entry(row: pd.Series,
         ],
     }
     return payload, None
+
 
 def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
     headers = _api_headers()
@@ -564,6 +626,48 @@ if not sources:
 else:
     choice = st.radio("Source", list(sources.keys()), horizontal=True)
     df_src = sources[choice]
+
+    # Preflight: check which account numbers from the grid exist in bexio
+    with st.expander("Preflight: check accounts present in bexio"):
+        if _is_authenticated():
+            acc_map = _fetch_accounts_map()
+            st.caption(f"Fetched {len(acc_map)} accounts from bexio.")
+
+            import re
+            def _norm(n: str) -> str:
+                return re.sub(r"\s+", "", str(n or "")).replace("\u00A0", "").strip()
+
+            # Be robust if one of the columns is missing
+            present_cols = [c for c in ("Soll", "Haben") if c in df_src.columns]
+            if present_cols:
+                df_accounts = set(
+                    _norm(x)
+                    for x in pd.concat([df_src[c] for c in present_cols], axis=0)
+                          .dropna()
+                          .astype(str)
+                )
+                missing = []
+                for a in sorted(df_accounts):
+                    if not a:
+                        continue
+                    if a in acc_map:
+                        continue
+                    a_no0 = a.lstrip("0")
+                    if a_no0 and a_no0 in acc_map:
+                        continue
+                    missing.append(a)
+                if missing:
+                    st.error(
+                        f"Missing in bexio: {', '.join(missing[:50])}"
+                        + (" …" if len(missing) > 50 else "")
+                    )
+                else:
+                    st.success("All account numbers in your grid exist in bexio.")
+            else:
+                st.warning("Columns 'Soll'/'Haben' not found in the grid.")
+        else:
+            st.info("Connect via OAuth to run the preflight account check.")
+
     st.dataframe(df_src.head(10), width="stretch")
 
     col1, col2, col3 = st.columns([1, 1, 2])
@@ -601,15 +705,13 @@ else:
             if dry_run:
                 st.code(json.dumps(payload, ensure_ascii=False, indent=2))
                 ok = True
-                msg = "(dry-run)"
             else:
                 ok, msg = post_manual_entry(payload)
+                if not ok:
+                    errors.append({"row": i, "error": msg, "payload": payload})
 
             if ok:
                 ok_count += 1
-            else:
-                errors.append({"row": i, "error": msg, "payload": payload})
-
             progress.progress(i / n)
 
         st.success(f"Done: {ok_count}/{n} successful.")
