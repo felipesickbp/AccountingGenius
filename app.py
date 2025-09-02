@@ -63,8 +63,10 @@ REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
 SCOPES = _get(
     "BEXIO_SCOPES",
-    "openid profile offline_access accounting contact_edit kb_invoice_edit bank_payment_edit",
+    # minimum set for accounting v3 + OIDC basics
+    "openid profile email offline_access accounting_edit",
 )
+
 
 
 
@@ -99,10 +101,11 @@ TOKEN_URL    = _oidc.get("token_endpoint")
 USERINFO_URL = _oidc.get("userinfo_endpoint")
 ISSUER       = _oidc.get("issuer", OIDC_ISSUER)
 
-# Keep the base host clean; put the version in the endpoint constant.
-API_BASE = _get("BEXIO_API_BASE", "https://api.bexio.com")
-# v3 accounting resource uses hyphens, not underscores.
-MANUAL_ENTRY_ENDPOINT = _get("BEXIO_MANUAL_ENTRY_ENDPOINT", "/3.0/accounting/manual-entries")
+API_BASE = _get("BEXIO_API_BASE", "https://api.bexio.com")  # keep root here
+ACCOUNTING_BASE = "https://api.bexio.com/3.0/accounting"    # v3 accounting base
+# v3 uses hyphen-case resource names:
+MANUAL_ENTRY_ENDPOINT = "/manual-entries"
+
 
 
 
@@ -400,81 +403,70 @@ ACCOUNTING_BASE = "https://api.bexio.com/3.0/accounting"
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _fetch_accounts_map() -> Dict[str, str]:
-    """
-    Return {normalized_account_number: account_id} from bexio.
-    Tries several endpoints and JSON shapes. Shows a small debug if nothing found.
-    """
     import re
-
     def _norm(s: str) -> str:
-        # strip spaces and NBSP; keep leading zeros (we'll try both)
         return re.sub(r"\s+", "", (s or "").replace("\u00A0", "")).strip()
 
     headers = _api_headers()
-    endpoints = [
-        "/3.0/accounting/accounts?page[size]=500",  # v3
-        "/3.0/accounting/accounts",                 # v3 (no page param)
-        "/2.0/accounting/accounts",                 # v2 fallback
-        "/2.0/account",                             # v2 older fallback
-    ]
-
     out: Dict[str, str] = {}
     last_errors = []
 
-    for ep in endpoints:
-        url = f"{API_BASE}{ep}"
-        try:
-            r = requests.get(url, headers=headers, timeout=30)
-            if not r.ok:
-                last_errors.append(f"{ep} -> {r.status_code} {r.text[:200]}")
-                continue
-
-            # Try common shapes
-            try:
-                data = r.json()
-            except Exception:
-                last_errors.append(f"{ep} -> non-JSON response")
-                continue
-
-            # Unwrap common wrappers
+    # v3 primary endpoint
+    ep = f"{ACCOUNTING_BASE}/accounts?page[size]=500"
+    try:
+        r = requests.get(ep, headers=headers, timeout=30)
+        if r.ok:
+            data = r.json() or []
+            # some APIs wrap the list — try common keys
             if isinstance(data, dict):
                 for key in ("data", "results", "items", "accounts"):
                     if isinstance(data.get(key), list):
                         data = data[key]
                         break
-
-            if not isinstance(data, list):
-                # Unexpected shape; log and continue
-                last_errors.append(f"{ep} -> unexpected JSON shape: {type(data).__name__}")
-                continue
-
-            # Collect numbers + ids from different field names
-            found_any = False
-            for it in data:
-                if not isinstance(it, dict):
-                    continue
-                acc_id = it.get("id") or it.get("account_id") or it.get("uuid")
-                # field names we might see for account number
-                for nkey in ("number", "account_nr", "account_no", "account_number"):
-                    acc_nr = it.get(nkey)
+            if isinstance(data, list):
+                for it in data:
+                    if not isinstance(it, dict):
+                        continue
+                    acc_id = it.get("id") or it.get("account_id") or it.get("uuid")
+                    acc_nr = it.get("number") or it.get("account_nr") or it.get("account_no") or it.get("account_number")
                     if acc_id and acc_nr:
                         nr = _norm(str(acc_nr))
                         if nr:
                             out[nr] = str(acc_id)
-                            # also store no-leading-zeros variant
-                            out[nr.lstrip("0")] = str(acc_id)
-                            found_any = True
+                            out[nr.lstrip('0')] = str(acc_id)
+                if out:
+                    return out
+        last_errors.append(f"{ep} -> {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        last_errors.append(f"{ep} -> EXC {e}")
+
+    # (Optional) v2 fallbacks (will likely be 404 if not enabled)
+    for tail in ("/2.0/accounting/accounts", "/2.0/account"):
+        url = f"{API_BASE}{tail}"
+        try:
+            r = requests.get(url, headers=headers, timeout=30)
+            if r.ok:
+                data = r.json() or []
+                if isinstance(data, dict):
+                    for key in ("data", "results", "items"):
+                        if isinstance(data.get(key), list):
+                            data = data[key]
                             break
-            if found_any:
-                return out
-
-            last_errors.append(f"{ep} -> ok but no parsable items")
+                if isinstance(data, list):
+                    for it in data:
+                        acc_id = it.get("id") or it.get("account_id")
+                        acc_nr = it.get("number") or it.get("account_nr")
+                        if acc_id and acc_nr:
+                            nr = _norm(str(acc_nr))
+                            out[nr] = str(acc_id); out[nr.lstrip('0')] = str(acc_id)
+                    if out:
+                        return out
+            last_errors.append(f"{tail} -> {r.status_code} {r.text[:200]}")
         except Exception as e:
-            last_errors.append(f"{ep} -> EXC {e}")
+            last_errors.append(f"{tail} -> EXC {e}")
 
-    # If we arrive here, show one compact debug line in the UI
-    st.info("Accounts lookup returned 0 items. Check Accounting scopes and company context. "
-            "Diagnostics:\n" + "\n".join(last_errors[:4]))
+    st.info("Accounts lookup returned 0 items. Check that your app has the 'accounting_edit' scope and the correct company is selected.\n"
+            + "\n".join(last_errors[:4]))
     return {}
 
 
@@ -619,33 +611,33 @@ def row_to_manual_entry(row: pd.Series,
     desc = (str(row.get("Beschreibung", "")).strip() or None)
     ref  = (str(row.get("Belegnummer", "")).strip() or None)
 
-    payload: Dict = {
-        "type": "manual_single_entry",
-        "date": date_iso,
-        "reference_nr": ref,
-        "entries": [
-            {
-                "debit_account_id":  int(debit_id),
-                "credit_account_id": int(credit_id),
-                "amount":            amount_abs,
-                "currency_id":       int(currency_id),
-                "currency_factor":   currency_factor,
-                "description":       desc,
-            }
-        ],
-    }
-    return payload, None
+    payload = {
+    "type": "manual_single_entry",
+    "date": date_iso,                      # "YYYY-MM-DD"
+    "reference_nr": ref or None,
+    "entries": [
+        {
+            "debit_account_id":  int(debit_id),
+            "credit_account_id": int(credit_id),
+            "amount":            amount_abs,    # 2 decimals
+            "currency_id":       int(currency_id),
+            "currency_factor":   currency_factor or 1.0,
+            "description":       desc or None,
+        }
+    ],
+}
 
 
 def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
     headers = _api_headers()
     if "Authorization" not in headers:
         return False, "Not authenticated (OAuth missing)"
-    url = f"{ACCOUNTING_BASE}/manual_entries"  # v3 path
+    url = f"{ACCOUNTING_BASE}{MANUAL_ENTRY_ENDPOINT}"  # -> /3.0/accounting/manual-entries
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     if r.ok:
         return True, r.text
     return False, f"{r.status_code}: {r.text}"
+
 
 
 
