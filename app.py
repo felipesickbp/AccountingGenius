@@ -356,6 +356,25 @@ def _exchange_code_for_token(code: str) -> bool:
     }
     try:
         r = requests.post(TOKEN_URL, data=data, timeout=30)
+    except Exception as e:
+        st.error(f"OAuth exchange failed (network): {e}")
+        return False
+
+    if r.ok:
+        try:
+            _save_token(r.json())
+        except Exception:
+            st.error(f"OAuth exchange failed: invalid JSON in token response: {r.text[:400]}")
+            return False
+        return True
+
+    # Non-2xx: surface provider error payload if present
+    try:
+        err = r.json()
+    except Exception:
+        err = {"error": r.text[:400]}
+    st.error(f"OAuth exchange failed: {r.status_code} {err}")
+    return False
 
 
 def _api_headers() -> Dict[str, str]:
