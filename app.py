@@ -63,10 +63,8 @@ REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
 SCOPES = _get(
     "BEXIO_SCOPES",
-    # minimum set for accounting v3 + OIDC basics
-    "openid profile email offline_access accounting_edit",
+    "openid profile offline_access accounting contact_edit kb_invoice_edit bank_payment_edit",
 )
-
 
 
 
@@ -101,12 +99,8 @@ TOKEN_URL    = _oidc.get("token_endpoint")
 USERINFO_URL = _oidc.get("userinfo_endpoint")
 ISSUER       = _oidc.get("issuer", OIDC_ISSUER)
 
-API_BASE = _get("BEXIO_API_BASE", "https://api.bexio.com")  # keep root here
-ACCOUNTING_BASE = "https://api.bexio.com/3.0/accounting"    # v3 accounting base
-# v3 uses hyphen-case resource names:
-MANUAL_ENTRY_ENDPOINT = "/manual-entries"
-
-
+API_BASE = _get("BEXIO_API_BASE", "https://api.bexio.com/2.0")
+MANUAL_ENTRY_ENDPOINT = _get("BEXIO_MANUAL_ENTRY_ENDPOINT", "/accounting/manual_entries")
 
 
 
@@ -401,74 +395,65 @@ def get_userinfo() -> Optional[Dict]:
 # ──────────────────────────────────────────────────────────────────────────────
 ACCOUNTING_BASE = "https://api.bexio.com/3.0/accounting"
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _fetch_accounts_map() -> Dict[str, str]:
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_accounts_map() -> Dict[str, int]:
+    """
+    Map account number (e.g., '1020') -> account id (int).
+    - Follows pagination via RFC5988 Link header (rel="next")
+    - Tolerates different field names (account_nr, number, account_number)
+    - Normalizes numbers (trim, remove NBSP/whitespace, drop leading zeros variant)
+    """
     import re
-    def _norm(s: str) -> str:
-        return re.sub(r"\s+", "", (s or "").replace("\u00A0", "")).strip()
+
+    def _norm(n: str) -> str:
+        # strip spaces (incl. non-breaking), keep digits; typical CH charts have no leading zeros
+        s = re.sub(r"\s+", "", str(n or "")).replace("\u00A0", "").strip()
+        return s
+
+    def _norm_both_keys(n: str):
+        # return both the raw-normalized and a "no-leading-zeros" variant for matching
+        raw = _norm(n)
+        no0 = raw.lstrip("0") if raw else raw
+        return {raw, no0} if raw != no0 and no0 else {raw}
 
     headers = _api_headers()
-    out: Dict[str, str] = {}
-    last_errors = []
+    url = f"{ACCOUNTING_BASE}/accounts"
+    all_rows = []
 
-    # v3 primary endpoint
-    ep = f"{ACCOUNTING_BASE}/accounts?page[size]=500"
-    try:
-        r = requests.get(ep, headers=headers, timeout=30)
-        if r.ok:
-            data = r.json() or []
-            # some APIs wrap the list — try common keys
-            if isinstance(data, dict):
-                for key in ("data", "results", "items", "accounts"):
-                    if isinstance(data.get(key), list):
-                        data = data[key]
-                        break
-            if isinstance(data, list):
-                for it in data:
-                    if not isinstance(it, dict):
-                        continue
-                    acc_id = it.get("id") or it.get("account_id") or it.get("uuid")
-                    acc_nr = it.get("number") or it.get("account_nr") or it.get("account_no") or it.get("account_number")
-                    if acc_id and acc_nr:
-                        nr = _norm(str(acc_nr))
-                        if nr:
-                            out[nr] = str(acc_id)
-                            out[nr.lstrip('0')] = str(acc_id)
-                if out:
-                    return out
-        last_errors.append(f"{ep} -> {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        last_errors.append(f"{ep} -> EXC {e}")
+    def _next_from_link(link_header: Optional[str]) -> Optional[str]:
+        if not link_header:
+            return None
+        # Example: <https://.../accounts?page=2>; rel="next", <...>; rel="last"
+        for part in link_header.split(","):
+            seg = part.strip()
+            if 'rel="next"' in seg:
+                start = seg.find("<") + 1
+                end = seg.find(">", start)
+                if start > 0 and end > start:
+                    return seg[start:end]
+        return None
 
-    # (Optional) v2 fallbacks (will likely be 404 if not enabled)
-    for tail in ("/2.0/accounting/accounts", "/2.0/account"):
-        url = f"{API_BASE}{tail}"
-        try:
-            r = requests.get(url, headers=headers, timeout=30)
-            if r.ok:
-                data = r.json() or []
-                if isinstance(data, dict):
-                    for key in ("data", "results", "items"):
-                        if isinstance(data.get(key), list):
-                            data = data[key]
-                            break
-                if isinstance(data, list):
-                    for it in data:
-                        acc_id = it.get("id") or it.get("account_id")
-                        acc_nr = it.get("number") or it.get("account_nr")
-                        if acc_id and acc_nr:
-                            nr = _norm(str(acc_nr))
-                            out[nr] = str(acc_id); out[nr.lstrip('0')] = str(acc_id)
-                    if out:
-                        return out
-            last_errors.append(f"{tail} -> {r.status_code} {r.text[:200]}")
-        except Exception as e:
-            last_errors.append(f"{tail} -> EXC {e}")
+    # pull all pages
+    while url:
+        r = requests.get(url, headers=headers, timeout=30)
+        r.raise_for_status()
+        chunk = r.json() or []
+        if not isinstance(chunk, list):
+            # some APIs return {data:[...]} — be defensive
+            chunk = chunk.get("data", [])
+        all_rows.extend(chunk)
+        url = _next_from_link(r.headers.get("Link"))
 
-    st.info("Accounts lookup returned 0 items. Check that your app has the 'accounting_edit' scope and the correct company is selected.\n"
-            + "\n".join(last_errors[:4]))
-    return {}
-
+    # build map with tolerant keys
+    m: Dict[str, int] = {}
+    for a in all_rows:
+        nr = a.get("account_nr") or a.get("number") or a.get("account_number")
+        aid = a.get("id")
+        if nr and aid:
+            for key in _norm_both_keys(nr):
+                if key:  # last one wins is fine
+                    m[str(key)] = int(aid)
+    return m
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -499,23 +484,6 @@ def _fetch_currency_map() -> Dict[str, int]:
     except Exception:
         pass
     return {"CHF": 1}
-  
-def _debug_accounts_endpoints():
-    tries = [
-        "/3.0/accounting/accounts?page[size]=500",
-        "/3.0/accounting/accounts",
-        "/2.0/accounting/accounts",
-        "/2.0/account",
-    ]
-    res = []
-    for ep in tries:
-        url = f"{API_BASE}{ep}"
-        try:
-            r = requests.get(url, headers=_api_headers(), timeout=30)
-            res.append({"url": url, "status": r.status_code, "ok": r.ok, "body": r.text[:1000]})
-        except Exception as e:
-            res.append({"url": url, "error": str(e)})
-    return res
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -611,33 +579,33 @@ def row_to_manual_entry(row: pd.Series,
     desc = (str(row.get("Beschreibung", "")).strip() or None)
     ref  = (str(row.get("Belegnummer", "")).strip() or None)
 
-    payload = {
-    "type": "manual_single_entry",
-    "date": date_iso,                      # "YYYY-MM-DD"
-    "reference_nr": ref or None,
-    "entries": [
-        {
-            "debit_account_id":  int(debit_id),
-            "credit_account_id": int(credit_id),
-            "amount":            amount_abs,    # 2 decimals
-            "currency_id":       int(currency_id),
-            "currency_factor":   currency_factor or 1.0,
-            "description":       desc or None,
-        }
-    ],
-}
+    payload: Dict = {
+        "type": "manual_single_entry",
+        "date": date_iso,
+        "reference_nr": ref,
+        "entries": [
+            {
+                "debit_account_id":  int(debit_id),
+                "credit_account_id": int(credit_id),
+                "amount":            amount_abs,
+                "currency_id":       int(currency_id),
+                "currency_factor":   currency_factor,
+                "description":       desc,
+            }
+        ],
+    }
+    return payload, None
 
 
 def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
     headers = _api_headers()
     if "Authorization" not in headers:
         return False, "Not authenticated (OAuth missing)"
-    url = f"{ACCOUNTING_BASE}{MANUAL_ENTRY_ENDPOINT}"  # -> /3.0/accounting/manual-entries
+    url = f"{ACCOUNTING_BASE}/manual_entries"  # v3 path
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     if r.ok:
         return True, r.text
     return False, f"{r.status_code}: {r.text}"
-
 
 
 
