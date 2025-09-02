@@ -46,8 +46,8 @@ except Exception:
 # ──────────────────────────────────────────────────────────────────────────────
 # OAuth / API config (auth.bexio.com + OIDC discovery)
 # ──────────────────────────────────────────────────────────────────────────────
-CLIENT_ID = os.getenv("BEXIO_CLIENT_ID", "YOUR_CLIENT_ID")
-CLIENT_SECRET = os.getenv("BEXIO_CLIENT_SECRET", "YOUR_CLIENT_SECRET")
+CLIENT_ID = os.getenv("BEXIO_CLIENT_ID", "bc3d501e-bbfb-4d6f-ae59-6f93629cbe0f")
+CLIENT_SECRET = os.getenv("BEXIO_CLIENT_SECRET", "c6PO3_UaWnNHNkmm3f1dwO7QepW_h0FCW3ReepxN0OS4ojvWpaYWosbthiNYZuxw5w7W8zrMgEi0kO5Di6E3lQ")
 REDIRECT_URI = os.getenv("BEXIO_REDIRECT_URI", "http://localhost:8501")  # must match bexio app
 SCOPES = os.getenv(
     "BEXIO_SCOPES",
