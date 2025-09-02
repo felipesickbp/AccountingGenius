@@ -99,8 +99,11 @@ TOKEN_URL    = _oidc.get("token_endpoint")
 USERINFO_URL = _oidc.get("userinfo_endpoint")
 ISSUER       = _oidc.get("issuer", OIDC_ISSUER)
 
-API_BASE = _get("BEXIO_API_BASE", "https://api.bexio.com/2.0")
-MANUAL_ENTRY_ENDPOINT = _get("BEXIO_MANUAL_ENTRY_ENDPOINT", "/accounting/manual_entries")
+# Keep the base host clean; put the version in the endpoint constant.
+API_BASE = _get("BEXIO_API_BASE", "https://api.bexio.com")
+# v3 accounting resource uses hyphens, not underscores.
+MANUAL_ENTRY_ENDPOINT = _get("BEXIO_MANUAL_ENTRY_ENDPOINT", "/3.0/accounting/manual-entries")
+
 
 
 
@@ -395,86 +398,83 @@ def get_userinfo() -> Optional[Dict]:
 # ──────────────────────────────────────────────────────────────────────────────
 ACCOUNTING_BASE = "https://api.bexio.com/3.0/accounting"
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _fetch_accounts_map() -> Dict[str, int]:
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_accounts_map() -> Dict[str, str]:
     """
-    Map account number (e.g., '1020') -> account id (int).
-    - Tries multiple endpoints (v3 primary, then fallbacks)
-    - No raise_for_status; stores diagnostics in session for the UI
-    - Normalizes account numbers; tolerates field name variants
+    Return {normalized_account_number: account_id} from bexio.
+    Tries several endpoints and JSON shapes. Shows a small debug if nothing found.
     """
     import re
 
-    def _norm(n: str) -> str:
-        return re.sub(r"\s+", "", str(n or "")).replace("\u00A0", "").strip()
+    def _norm(s: str) -> str:
+        # strip spaces and NBSP; keep leading zeros (we'll try both)
+        return re.sub(r"\s+", "", (s or "").replace("\u00A0", "")).strip()
 
     headers = _api_headers()
-
-    candidates = [
-        "https://api.bexio.com/3.0/accounting/accounts",  # preferred
-        "https://api.bexio.com/3.0/accounts",             # fallback guess
-        "https://api.bexio.com/2.0/accounting/accounts",  # legacy guess
-        "https://api.bexio.com/2.0/accounts",             # legacy guess
+    endpoints = [
+        "/3.0/accounting/accounts?page[size]=500",  # v3
+        "/3.0/accounting/accounts",                 # v3 (no page param)
+        "/2.0/accounting/accounts",                 # v2 fallback
+        "/2.0/account",                             # v2 older fallback
     ]
 
-    tried = []
+    out: Dict[str, str] = {}
     last_errors = []
-    parsed_any = {}
 
-    for url in candidates:
+    for ep in endpoints:
+        url = f"{API_BASE}{ep}"
         try:
             r = requests.get(url, headers=headers, timeout=30)
-            tried.append((url, r.status_code))
             if not r.ok:
-                # collect a short error message for the UI
-                txt = (r.text or "")[:300].replace("\n", " ").strip()
-                last_errors.append(f"{url} -> {r.status_code} {txt}")
+                last_errors.append(f"{ep} -> {r.status_code} {r.text[:200]}")
                 continue
 
-            data = r.json() or []
-            # Some APIs return {"data":[...]} — be defensive:
-            if isinstance(data, dict) and "data" in data:
-                data = data["data"]
+            # Try common shapes
+            try:
+                data = r.json()
+            except Exception:
+                last_errors.append(f"{ep} -> non-JSON response")
+                continue
+
+            # Unwrap common wrappers
+            if isinstance(data, dict):
+                for key in ("data", "results", "items", "accounts"):
+                    if isinstance(data.get(key), list):
+                        data = data[key]
+                        break
 
             if not isinstance(data, list):
-                last_errors.append(f"{url} -> ok but unexpected shape")
+                # Unexpected shape; log and continue
+                last_errors.append(f"{ep} -> unexpected JSON shape: {type(data).__name__}")
                 continue
 
-            m: Dict[str, int] = {}
-            for a in data:
-                # Try common field names:
-                nr = a.get("account_nr") or a.get("number") or a.get("account_number")
-                aid = a.get("id")
-                if nr and aid:
-                    key = _norm(nr)
-                    if key:
-                        m[key] = int(aid)
-                        # also store no-leading-zeros variant
-                        no0 = key.lstrip("0")
-                        if no0 and no0 != key:
-                            m[no0] = int(aid)
+            # Collect numbers + ids from different field names
+            found_any = False
+            for it in data:
+                if not isinstance(it, dict):
+                    continue
+                acc_id = it.get("id") or it.get("account_id") or it.get("uuid")
+                # field names we might see for account number
+                for nkey in ("number", "account_nr", "account_no", "account_number"):
+                    acc_nr = it.get(nkey)
+                    if acc_id and acc_nr:
+                        nr = _norm(str(acc_nr))
+                        if nr:
+                            out[nr] = str(acc_id)
+                            # also store no-leading-zeros variant
+                            out[nr.lstrip("0")] = str(acc_id)
+                            found_any = True
+                            break
+            if found_any:
+                return out
 
-            if m:
-                parsed_any = m
-                st.session_state["accounts_fetch_debug"] = {
-                    "used_endpoint": url,
-                    "count": len(m),
-                    "tried": tried,
-                    "errors": last_errors[-3:],
-                }
-                return m
-            else:
-                last_errors.append(f"{url} -> ok but empty/parsable=0")
+            last_errors.append(f"{ep} -> ok but no parsable items")
         except Exception as e:
-            last_errors.append(f"{url} -> exception: {e}")
+            last_errors.append(f"{ep} -> EXC {e}")
 
-    # If we got here, everything failed
-    st.session_state["accounts_fetch_debug"] = {
-        "used_endpoint": None,
-        "count": 0,
-        "tried": tried,
-        "errors": last_errors[-5:],
-    }
+    # If we arrive here, show one compact debug line in the UI
+    st.info("Accounts lookup returned 0 items. Check Accounting scopes and company context. "
+            "Diagnostics:\n" + "\n".join(last_errors[:4]))
     return {}
 
 
@@ -507,6 +507,23 @@ def _fetch_currency_map() -> Dict[str, int]:
     except Exception:
         pass
     return {"CHF": 1}
+  
+def _debug_accounts_endpoints():
+    tries = [
+        "/3.0/accounting/accounts?page[size]=500",
+        "/3.0/accounting/accounts",
+        "/2.0/accounting/accounts",
+        "/2.0/account",
+    ]
+    res = []
+    for ep in tries:
+        url = f"{API_BASE}{ep}"
+        try:
+            r = requests.get(url, headers=_api_headers(), timeout=30)
+            res.append({"url": url, "status": r.status_code, "ok": r.ok, "body": r.text[:1000]})
+        except Exception as e:
+            res.append({"url": url, "error": str(e)})
+    return res
 
 
 # ──────────────────────────────────────────────────────────────────────────────
