@@ -44,33 +44,31 @@ except Exception:
     raiffeisen_transform = None  # type: ignore
 
 # ──────────────────────────────────────────────────────────────────────────────
-# OAuth / API config (auth.bexio.com + OIDC discovery)  ✅ production-safe
+# OAuth / API config (auth.bexio.com + OIDC discovery)
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Helper: prefer Streamlit Secrets, then env vars, then explicit fallback
 def _get(name: str, default: Optional[str] = None):
     return st.secrets.get(name, os.getenv(name, default))
 
-# Fill these via Streamlit Cloud → Settings → Secrets.
-# If you really want to hardcode, replace the placeholders below.
-CLIENT_ID     = _get("bc3d501e-bbfb-4d6f-ae59-6f93629cbe0f",     "bc3d501e-bbfb-4d6f-ae59-6f93629cbe0f")
-CLIENT_SECRET = _get("c6PO3_UaWnNHNkmm3f1dwO7QepW_h0FCW3ReepxN0OS4ojvWpaYWosbthiNYZuxw5w7W8zrMgEi0kO5Di6E3lQ", "c6PO3_UaWnNHNkmm3f1dwO7QepW_h0FCW3ReepxN0OS4ojvWpaYWosbthiNYZuxw5w7W8zrMgEi0kO5Di6E3lQ")
+# === Put YOUR real keys/URL here (or set them in Streamlit Secrets) ===
+HARDCODED_CLIENT_ID     = "bc3d501e-bbfb-4d6f-ae59-6f93629cbe0f"
+HARDCODED_CLIENT_SECRET = "c6PO3_UaWnNHNkmm3f1dwO7QepW_h0FCW3ReepxN0OS4ojvWpaYWosbthiNYZuxw5w7W8zrMgEi0kO5Di6E3lQ"
+HARDCODED_REDIRECT_URI  = "https://accountinggenius-mdcq7sh8scyxglc7vvwcuh.streamlit.app"  # must match bexio app exactly
 
-# IMPORTANT: this must match the Redirect URL configured in bexio dev portal EXACTLY
-REDIRECT_URI  = _get(
-    "BEXIO_REDIRECT_URI",
-    "https://accountinggenius-mdcq7sh8scyxglc7vvwcuh.streamlit.app"
-)
+# Resolved config (Secrets/env take precedence, else hardcoded)
+CLIENT_ID     = _get("BEXIO_CLIENT_ID",     HARDCODED_CLIENT_ID)
+CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", HARDCODED_CLIENT_SECRET)
+REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
 SCOPES = _get(
     "BEXIO_SCOPES",
     "openid profile offline_access contact_edit kb_invoice_edit bank_payment_edit",
 )
 
-# Fail fast if still using placeholders
-if any(x in (None, "", "bc3d501e-bbfb-4d6f-ae59-6f93629cbe0f", "c6PO3_UaWnNHNkmm3f1dwO7QepW_h0FCW3ReepxN0OS4ojvWpaYWosbthiNYZuxw5w7W8zrMgEi0kO5Di6E3lQ")
-       for x in (CLIENT_ID, CLIENT_SECRET)):
-    st.error("Missing BEXIO_CLIENT_ID / BEXIO_CLIENT_SECRET. Set Streamlit secrets or replace placeholders.")
+# Fail fast if empty or still placeholders
+if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIENT_ID, CLIENT_SECRET)):
+    st.error("Missing BEXIO_CLIENT_ID / BEXIO_CLIENT_SECRET. Fill the HARDCODED_* values or set Streamlit secrets.")
     st.stop()
 
 # OIDC discovery on the new issuer (auth.bexio.com)
@@ -101,6 +99,7 @@ ISSUER       = _oidc.get("issuer", OIDC_ISSUER)
 
 API_BASE = _get("BEXIO_API_BASE", "https://api.bexio.com/2.0")
 MANUAL_ENTRY_ENDPOINT = _get("BEXIO_MANUAL_ENTRY_ENDPOINT", "/accounting/manual_entries")
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
