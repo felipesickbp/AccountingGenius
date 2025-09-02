@@ -481,40 +481,68 @@ if st.button("Post to bexio now", disabled=disabled):
 # ──────────────────────────────────────────────────────────────────────────────
 # Posting to bexio – build payloads and send
 # ──────────────────────────────────────────────────────────────────────────────
-def row_to_manual_entry(row: pd.Series) -> Dict:
-    """Map our template row to a bexio manual entry payload."""
-    date_str = str(row.get("Datum", "")).strip()
-    try:
-        dt_iso = datetime.strptime(date_str, "%d.%m.%Y").date().isoformat() if date_str else None
-    except Exception:
-        dt_iso = None
-    amount = row.get("Betrag", "")
-    try:
-        amount_f = float(str(amount).replace("'", "").replace(",", ".")) if amount != "" else 0.0
-    except Exception:
-        amount_f = 0.0
+st.markdown("---")
+st.header("Post rows to bexio (manual entries)")
 
-    payload = {
-        "date": dt_iso,
-        "text": (str(row.get("Beschreibung", "")).strip() or None),
-        "currency_code": (str(row.get("Währung", "CHF")).strip() or "CHF"),
-        "exchange_rate": (str(row.get("Wechselkurs", "")).strip() or None),
-        "lines": [
-            {"account_id": str(row.get("Soll", "")).strip(),  "debit": round(abs(amount_f), 2), "credit": 0.0},
-            {"account_id": str(row.get("Haben", "")).strip(), "debit": 0.0,                     "credit": round(abs(amount_f), 2)},
-        ],
-        "vat_code": (str(row.get("MWST Code", "")).strip() or None),
-        "vat_account": (str(row.get("MWST Konto", "")).strip() or None),
-        "external_reference": (str(row.get("Belegnummer", "")).strip() or None),
-    }
-    def _clean(d: Dict) -> Dict:
-        return {k: v for k, v in d.items() if v not in (None, "")}
-    payload = _clean(payload)
-    payload["lines"] = [_clean(x) for x in payload.get("lines", [])]
-    return payload
+sources: Dict[str, pd.DataFrame] = {}
+if isinstance(st.session_state.get("editor_df"), pd.DataFrame):
+    sources["Edited grid"] = st.session_state["editor_df"]
+if isinstance(st.session_state.get("ledger_df"), pd.DataFrame):
+    sources["Processed ledger (original)"] = st.session_state["ledger_df"]
+
+if not sources:
+    st.info("Load/process data first to enable posting.")
+else:
+    choice = st.radio("Source", list(sources.keys()), horizontal=True)
+    df_src = sources[choice]
+    st.dataframe(df_src.head(10), width="stretch")  # replace use_container_width
+
+    col1, col2, col3 = st.columns([1, 1, 2])
+    with col1:
+        dry_run = st.toggle("Dry run (don’t call API)", value=True, key="dry_run_toggle")
+    with col2:
+        row_limit = st.number_input("Max rows", min_value=1, value=50, step=10, key="row_limit_input")
+    with col3:
+        st.caption("Tip: start with Dry run to validate payloads.")
+
+    # Enable the button when PAT or OAuth is available (or always in dry-run)
+    disabled = (not _is_authenticated()) and (not dry_run)
+    if st.button("Post to bexio now", disabled=disabled):
+        if not dry_run and not _is_authenticated():
+            st.error("Please connect to bexio first (OAuth or PAT).")
+            st.stop()
+
+        n = min(len(df_src), int(row_limit))
+        progress = st.progress(0.0)
+        ok_count = 0
+        errors = []
+
+        for i, (_, row) in enumerate(df_src.head(n).iterrows(), start=1):
+            payload = row_to_manual_entry(row)
+            if dry_run:
+                st.code(json.dumps(payload, ensure_ascii=False, indent=2))
+                ok = True
+                msg = "(dry-run)"
+            else:
+                ok, msg = post_manual_entry(payload)
+
+            if ok:
+                ok_count += 1
+            else:
+                errors.append({"row": i, "error": msg, "payload": payload})
+
+            progress.progress(i / n)
+
+        st.success(f"Done: {ok_count}/{n} successful.")
+        if errors:
+            with st.expander("Show errors"):
+                for e in errors:
+                    st.write(f"Row {e['row']}: {e['error']}")
+                    st.code(json.dumps(e["payload"], ensure_ascii=False, indent=2))
+
 
 def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
-    headers = _api_headers()  # chooses PAT first, else OAuth
+    headers = _api_headers()  # picks PAT first, else OAuth
     if "Authorization" not in headers:
         return False, "Not authenticated (OAuth or PAT missing)"
     url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"
@@ -522,6 +550,7 @@ def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
     if r.ok:
         return True, r.text
     return False, f"{r.status_code}: {r.text}"
+
 
 
 # Choose source for posting
