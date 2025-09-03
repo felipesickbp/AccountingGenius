@@ -61,7 +61,9 @@ CLIENT_ID     = _get("BEXIO_CLIENT_ID",     HARDCODED_CLIENT_ID)
 CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", HARDCODED_CLIENT_SECRET)
 REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
-SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access")
+# This is the minimum set for login + posting manual entries
+SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access accounting_edit")
+
 
 
 
@@ -302,6 +304,25 @@ def _save_token(tok: Dict):
         expires_at=time.time() + int(tok.get("expires_in", 3600)) - 30,
     )
 
+def _current_scopes() -> str:
+    tok: Optional[Token] = st.session_state.get("bexio_token")
+    if not tok or not tok.access_token:
+        return ""
+    parts = tok.access_token.split(".")
+    if len(parts) != 3:
+        return ""
+    import base64, json
+    def b64url_decode(s: str) -> bytes:
+        s += "=" * (-len(s) % 4)
+        return base64.urlsafe_b64decode(s.encode("utf-8"))
+    try:
+        payload = json.loads(b64url_decode(parts[1]).decode("utf-8"))
+        # Keycloak typically puts a space-separated string in "scope"
+        return payload.get("scope", "")
+    except Exception:
+        return ""
+
+
 def _token_valid() -> bool:
     tok: Optional[Token] = st.session_state.get("bexio_token")
     return bool(tok and tok.access_token and time.time() < tok.expires_at)
@@ -340,6 +361,23 @@ def _auth_link(force_login: bool = False, scopes: Optional[str] = None) -> str:
 def _is_authenticated() -> bool:
     return _token_valid()
 
+def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
+    headers = _api_headers()
+    if "Authorization" not in headers:
+        return False, "Not authenticated (OAuth missing)"
+    url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    if r.ok:
+        return True, r.text
+
+    if r.status_code == 403:
+        return False, ("403 Forbidden – Most likely your token is missing the 'accounting_edit' scope "
+                       "or the bexio company chosen during OAuth doesn’t grant you accounting rights.")
+    if r.status_code == 401:
+        return False, "401 Unauthorized – token expired/invalid. Click Connect again."
+    if r.status_code == 422:
+        return False, f"422 Validation error: {r.text}"
+    return False, f"{r.status_code}: {r.text}"
 
 
 
@@ -462,7 +500,7 @@ with st.expander("OAuth debug"):
     st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
     scopes_input = st.text_input(
         "Scopes to request",
-        value=SCOPES,  # default to whatever you set
+        value=SCOPES,
         help="If login fails, try: 'openid profile email offline_access' first."
     )
     st.code(_auth_link(scopes=scopes_input))  # show the exact URL
@@ -476,7 +514,16 @@ with left:
         info = get_userinfo() or {}
         email = info.get("email") or info.get("preferred_username")
         st.caption(f"Logged in as: {email or '—'}")
+
+        # NEW: show scopes on the current token
+        sc = _current_scopes()
+        if sc:
+            st.caption(f"Token scopes: {sc}")
+        else:
+            st.caption("Token scopes: (unavailable)")
+
         st.link_button("Switch company (re-login)", _auth_link(force_login=True, scopes=scopes_input))
+
     st.caption(f"Issuer: {ISSUER}")
     st.caption(f"Redirect: {REDIRECT_URI}")
 
@@ -571,15 +618,5 @@ else:
                 for e in errors:
                     st.write(f"Row {e['row']}: {e['error']}")
                     st.code(json.dumps(e["payload"], ensure_ascii=False, indent=2))
-
-def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
-    headers = _api_headers()  # OAuth only now
-    if "Authorization" not in headers:
-        return False, "Not authenticated (OAuth missing)"
-    url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"
-    r = requests.post(url, headers=headers, json=payload, timeout=30)
-    if r.ok:
-        return True, r.text
-    return False, f"{r.status_code}: {r.text}"
 
 
