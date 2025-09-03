@@ -64,20 +64,14 @@ REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 # This is the minimum set for login + posting manual entries
 SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access accounting_edit")
 
-
-
-
-
 # Fail fast if empty or still placeholders
 if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIENT_ID, CLIENT_SECRET)):
     st.error("Missing BEXIO_CLIENT_ID / BEXIO_CLIENT_SECRET. Fill the HARDCODED_* values or set Streamlit secrets.")
     st.stop()
 
 
-
-# Keep scopes minimal first; you can add accounting_edit later in the UI box
-SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access")
-
+API_BASE = _get("BEXIO_API_BASE", "https://api.bexio.com/2.0")
+MANUAL_ENTRY_ENDPOINT = _get("BEXIO_MANUAL_ENTRY_ENDPOINT", "/accounting/manual_entries")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
