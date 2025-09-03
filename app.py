@@ -61,10 +61,10 @@ CLIENT_ID     = _get("BEXIO_CLIENT_ID",     HARDCODED_CLIENT_ID)
 CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", HARDCODED_CLIENT_SECRET)
 REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
-# one single definition, near the top:
-BASE_SCOPES = "openid"   # start minimal to avoid loops
-# Optional extra scopes (kept empty by default until confirmed in bexio dev portal)
-EXTRA_SCOPES_DEFAULT = ""   # e.g. "accounting_edit" once your app is allowed
+:
+# Request OIDC + refresh + a harmless read scope you can smoke-test
+BASE_SCOPES = "openid offline_access contact_show"
+EXTRA_SCOPES_DEFAULT = ""  # add more later via the UI if needed
 
 
 # Bexio REST base + endpoint for manual journal entries (v2)
@@ -429,7 +429,8 @@ KNOWN_MANUAL_ENDPOINTS = [
 
 def smoke_test():
     headers = _api_headers()
-    url = f"{API_BASE}/users/me"
+    # Use an endpoint that matches the scopes you requested
+    url = f"{API_BASE}/contact?limit=1"
     r = requests.get(url, headers=headers, timeout=15)
     return r.status_code, r.text[:400]
 
@@ -575,14 +576,6 @@ def _api_headers() -> Dict[str, str]:
     return headers
 
 
-    # OAuth fallback
-    _refresh_token_if_needed()
-    tok: Token = st.session_state.get("bexio_token")  # may be None
-    if not tok:
-        # No PAT and no OAuth token yet
-        return {"Accept": "application/json"}
-    return {"Accept": "application/json", "Authorization": f"Bearer {tok.access_token}"}
-
 def get_userinfo() -> Optional[Dict]:
     try:
         headers = _api_headers()
@@ -603,18 +596,16 @@ with st.expander("OAuth debug"):
     st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
 
     preset = st.selectbox(
-        "Scope preset",
-        [
-            "openid",
-            "openid profile",
-            "openid profile email",
-            "openid accounting_edit",
-            "openid profile email accounting_edit",
-            # add offline_access only if you know your client has it:
-            # "openid profile email offline_access accounting_edit",
-        ],
-        index=0,
-    )
+    "Scope preset",
+    [
+        "openid offline_access contact_show",
+        "openid offline_access contact_show kb_invoice_show",
+        "openid offline_access contact_show bank_account_show",
+        "openid offline_access all",
+    ],
+    index=0,
+)
+
     scopes_input = st.text_input(
         "Scopes to request (space-separated)",
         value=preset,
