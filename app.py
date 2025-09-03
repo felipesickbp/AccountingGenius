@@ -355,18 +355,6 @@ class Token:
     refresh_token: Optional[str]
     expires_at: float
 
-def smoke_test():
-    headers = _api_headers()
-    url = f"{API_BASE}/users/me"
-    r = requests.get(url, headers=headers, timeout=15)
-    return r.status_code, r.text[:400]
-
-if _token_valid():
-    code, txt = smoke_test()
-    st.caption(f"API smoke test: {code}")
-    if code != 200:
-        st.warning("Token is valid for login but not for the API...")
-
 
 
 def _save_token(tok: Dict):
@@ -439,6 +427,20 @@ KNOWN_MANUAL_ENDPOINTS = [
     "/accounting/journal_entries",        # sometimes used naming
     "/accounting/manual-entries",         # v3-ish naming in some stacks
 ]
+
+def smoke_test():
+    headers = _api_headers()
+    url = f"{API_BASE}/users/me"
+    r = requests.get(url, headers=headers, timeout=15)
+    return r.status_code, r.text[:400]
+
+if _token_valid():
+    code, txt = smoke_test()
+    st.caption(f"API smoke test: {code}")
+    if code != 200:
+        st.warning("Token is valid for login but not for the API...")
+
+
 
 def post_manual_entry(payload: dict) -> tuple[bool, str]:
     headers = _api_headers()
