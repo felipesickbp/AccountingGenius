@@ -382,7 +382,6 @@ def _current_scopes() -> str:
     except Exception:
         return ""
 
-
 def _token_valid() -> bool:
     tok: Optional[Token] = st.session_state.get("bexio_token")
     return bool(tok and tok.access_token and time.time() < tok.expires_at)
@@ -433,13 +432,6 @@ def smoke_test():
     url = f"{API_BASE}/users/me"
     r = requests.get(url, headers=headers, timeout=15)
     return r.status_code, r.text[:400]
-
-if _token_valid():
-    code, txt = smoke_test()
-    st.caption(f"API smoke test: {code}")
-    if code != 200:
-        st.warning("Token is valid for login but not for the API...")
-
 
 
 def post_manual_entry(payload: dict) -> tuple[bool, str]:
@@ -637,9 +629,12 @@ with st.expander("OAuth debug"):
     st.code(_auth_link(scopes=effective_scopes))
 
 
+# keep your smoke_test() definition where it is, but do NOT call it at top level
+
 left, right = st.columns([1, 1])
 with left:
-    if not _token_valid():
+    tok_ok = _token_valid()   # safe to call now; helpers already defined below this line
+    if not tok_ok:
         st.link_button("🔗 Connect to bexio (OAuth)", _auth_link(scopes=scopes_input))
     else:
         st.success("Connected via OAuth")
@@ -647,14 +642,15 @@ with left:
         email = info.get("email") or info.get("preferred_username")
         st.caption(f"Logged in as: {email or '—'}")
 
-        # NEW: show scopes on the current token
         sc = _current_scopes()
-        if sc:
-            st.caption(f"Token scopes: {sc}")
-        else:
-            st.caption("Token scopes: (unavailable)")
+        st.caption(f"Token scopes: {sc or '(unavailable)'}")
 
-        st.link_button("Switch company (re-login)", _auth_link(force_login=True, scopes=scopes_input))
+        # 🔹 run smoke test here instead of at top level
+        code, txt = smoke_test()
+        st.caption(f"API smoke test: {code}")
+        if code != 200:
+            st.warning("Token is valid for login but not for the API. This usually means your app/client is not yet allowed to call the API or the required API scope(s) are missing.")
+
 
     st.caption(f"Issuer: {ISSUER}")
     st.caption(f"Redirect: {REDIRECT_URI}")
