@@ -61,9 +61,10 @@ CLIENT_ID     = _get("BEXIO_CLIENT_ID",     HARDCODED_CLIENT_ID)
 CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", HARDCODED_CLIENT_SECRET)
 REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
-# This is the minimum set for login + posting manual entries
-SCOPES = "openid profile email offline_access"   # ← no accounting_edit here
-
+# one single definition, near the top:
+BASE_SCOPES = "openid profile email offline_access"   # minimal, safe default
+# Optional extra scopes (kept empty by default until confirmed in bexio dev portal)
+EXTRA_SCOPES_DEFAULT = ""   # e.g. "accounting_edit" once your app is allowed
 
 
 # Bexio REST base + endpoint for manual journal entries (v2)
@@ -83,6 +84,13 @@ if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIE
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Bank ↦ Ledger (+ Excel editor + bexio)", layout="wide")
 st.title("Bank Statement → Ledger CSV · Excel editor · bexio posting")
+qp = st.query_params
+err = qp.get("error")
+err_desc = qp.get("error_description")
+if err:
+    st.error(f"OAuth error: {err} — {err_desc or ''}")
+    # optional: offer a “Retry with minimal scopes” button
+
 
 
 # init editor/posting state
@@ -162,11 +170,18 @@ def finalise(df: pd.DataFrame, first_no: int) -> pd.DataFrame:
             df[col] = ""
     return df[TEMPLATE_ORDER]
 
-def api_smoke():
-    url = f"{API_BASE}/kb_invoice?limit=1"
-    r = requests.get(url, headers=_api_headers(), timeout=15)
-    st.write({"smoke_status": r.status_code, "ok": r.ok})
-    st.text(r.text[:1000])  # show server’s hint
+def smoke_test():
+    headers = _api_headers()
+    url = f"{API_BASE}/users/me"   # or /companies if you prefer
+    r = requests.get(url, headers=headers, timeout=15)
+    return r.status_code, r.text[:400]
+
+if _token_valid():
+    code, txt = smoke_test()
+    st.caption(f"API smoke test: {code}")
+    if code != 200:
+        st.warning("Token is valid for login but not for the API. This usually means your app/client is not yet allowed to call the API or you’re missing the required API scope(s).")
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -402,19 +417,20 @@ def _refresh_token_if_needed():
 
 def _auth_link(force_login: bool = False, scopes: Optional[str] = None) -> str:
     from urllib.parse import urlencode
-    scope_str = (scopes or "openid profile email offline_access").strip()
+    scope_str = (scopes or BASE_SCOPES).strip()
     params = {
         "response_type": "code",
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
         "scope": scope_str,
         "state": str(int(time.time())),
-        # These two help: force account+company picker & a new consent screen
-        "prompt": "login consent",
+        # optional but recommended if you want refresh tokens reliably:
+        "access_type": "offline",
+        "prompt": "consent" if "offline_access" in scope_str else None,
     }
-    base = AUTH_URL  # realm-based auth URL you already discovered
+    params = {k: v for k, v in params.items() if v is not None}
+    base = AUTH_URL or f"{OIDC_ISSUER}/protocol/openid-connect/auth"
     return f"{base}?{urlencode(params)}"
-
 
 def _is_authenticated() -> bool:
     return _token_valid()
@@ -613,6 +629,11 @@ with st.expander("OAuth debug"):
     )
 
     st.code(_auth_link(scopes=scopes_input))
+with st.expander("OAuth debug"):
+    st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
+    extra = st.text_input("Extra scopes (advanced)", value=EXTRA_SCOPES_DEFAULT)
+    effective_scopes = (BASE_SCOPES + " " + extra).strip() if extra else BASE_SCOPES
+    st.code(_auth_link(scopes=effective_scopes))
 
 
 left, right = st.columns([1, 1])
