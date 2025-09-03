@@ -357,7 +357,7 @@ class Token:
 
 def smoke_test():
     headers = _api_headers()
-    url = f"{API_BASE}/users/me"   # or /companies if you prefer
+    url = f"{API_BASE}/users/me"
     r = requests.get(url, headers=headers, timeout=15)
     return r.status_code, r.text[:400]
 
@@ -365,8 +365,7 @@ if _token_valid():
     code, txt = smoke_test()
     st.caption(f"API smoke test: {code}")
     if code != 200:
-        st.warning("Token is valid for login but not for the API. This usually means your app/client is not yet allowed to call the API or you’re missing the required API scope(s).")
-
+        st.warning("Token is valid for login but not for the API...")
 
 
 
