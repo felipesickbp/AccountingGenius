@@ -54,7 +54,7 @@ def _get(name: str, default: Optional[str] = None):
 # === Put YOUR real keys/URL here (or set them in Streamlit Secrets) ===
 HARDCODED_CLIENT_ID     = "fe40a7f4-af9a-439d-ba6e-7fc83887c748"
 HARDCODED_CLIENT_SECRET = "AOEYq3mT-H9ol06ZTKsZfLtSS7wB5uYnOuz9LUwIsYGP4umiyDxJJDHm2blAR1tH3tSwFbuEnnE8N1zucwpO1rY"
-HARDCODED_REDIRECT_URI  = "https://accountinggenius-mdcq7sh8scyxglc7vvwcuh.streamlit.app"  # must match bexio app exactly
+HARDCODED_REDIRECT_URI  = "https://accountinggenius-mdcq7sh8scyxglc7vvwcuh.streamlit.app"  # matches bexio app exactly
 
 # Resolved config (Secrets/env take precedence, else hardcoded)
 CLIENT_ID     = _get("BEXIO_CLIENT_ID",     HARDCODED_CLIENT_ID)
@@ -72,6 +72,7 @@ if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIE
 # OIDC discovery on the current issuer (https://auth.bexio.com)
 OIDC_ISSUER = _get("BEXIO_OIDC_ISSUER", "https://auth.bexio.com")
 DISCOVERY_URL = f"{OIDC_ISSUER}/.well-known/openid-configuration"
+
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -317,18 +318,20 @@ def _refresh_token_if_needed():
     else:
         st.warning(f"Token refresh failed: {r.status_code} {r.text}")
 
-def _auth_link(force_login: bool = False) -> str:
+def _auth_link(force_login: bool = False, scopes: Optional[str] = None) -> str:
     from urllib.parse import urlencode
+    scope_str = (scopes or SCOPES).strip()
     params = {
         "response_type": "code",
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
-        "scope": SCOPES,
-        "state": str(int(time.time())),
+        "scope": scope_str,
+        "state": str(int(time.time())),  # ok to keep simple
     }
     if force_login:
-        params["prompt"] = "login"  # forces account/company re-pick
-    return f"{AUTH_URL}?{urlencode(params)}"
+        params["prompt"] = "login"
+    base = AUTH_URL or f"{OIDC_ISSUER}/authorize"
+    return f"{base}?{urlencode(params)}"
 
 
 def _is_authenticated() -> bool:
@@ -401,22 +404,25 @@ def get_userinfo() -> Optional[Dict]:
 st.markdown("---")
 st.header("Connect to bexio (auth.bexio.com)")
 
-
 with st.expander("OAuth debug"):
     st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
-    st.code(_auth_link())  # verify redirect_uri
+    scopes_input = st.text_input(
+        "Scopes to request",
+        value=SCOPES,  # default to whatever you set
+        help="If login fails, try: 'openid profile email offline_access' first."
+    )
+    st.code(_auth_link(scopes=scopes_input))  # show the exact URL
 
 left, right = st.columns([1, 1])
-
 with left:
     if not _token_valid():
-        st.link_button("🔗 Connect to bexio (OAuth)", _auth_link())
+        st.link_button("🔗 Connect to bexio (OAuth)", _auth_link(scopes=scopes_input))
     else:
         st.success("Connected via OAuth")
         info = get_userinfo() or {}
         email = info.get("email") or info.get("preferred_username")
         st.caption(f"Logged in as: {email or '—'}")
-        st.link_button("Switch company (re-login)", _auth_link(force_login=True))
+        st.link_button("Switch company (re-login)", _auth_link(force_login=True, scopes=scopes_input))
     st.caption(f"Issuer: {ISSUER}")
     st.caption(f"Redirect: {REDIRECT_URI}")
 
@@ -429,6 +435,25 @@ with right:
         if _exchange_code_for_token(code):
             st.query_params.clear()
             st.rerun()
+
+with st.expander("Troubleshooting"):
+    if st.button("Reset auth & clear caches"):
+        st.session_state.pop("bexio_token", None)
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        st.success("Cleared. Click 'Connect to bexio' again.")
+
+with st.expander("Diagnostics: OIDC endpoints"):
+    try:
+        r = requests.get(DISCOVERY_URL, timeout=10)
+        st.write({"discovery_url": DISCOVERY_URL, "status": r.status_code, "ok": r.ok})
+    except Exception as e:
+        st.write({"discovery_url": DISCOVERY_URL, "error": str(e)})
+
+    test_auth_url = _auth_link(scopes=scopes_input)
+    st.write({"auth_url": test_auth_url})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
