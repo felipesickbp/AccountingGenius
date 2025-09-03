@@ -69,36 +69,15 @@ if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIE
     st.error("Missing BEXIO_CLIENT_ID / BEXIO_CLIENT_SECRET. Fill the HARDCODED_* values or set Streamlit secrets.")
     st.stop()
 
-# OIDC discovery on the current issuer (https://auth.bexio.com)
-OIDC_ISSUER = _get("BEXIO_OIDC_ISSUER", "https://auth.bexio.com")
-DISCOVERY_URL = f"{OIDC_ISSUER}/.well-known/openid-configuration"
+# Auth endpoints (no discovery – bexio doesn't publish one at the root)
+OIDC_ISSUER  = "https://auth.bexio.com"
+AUTH_URL     = "https://auth.bexio.com/authorize"
+TOKEN_URL    = "https://auth.bexio.com/token"
+USERINFO_URL = "https://auth.bexio.com/userinfo"
+ISSUER       = OIDC_ISSUER
 
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _discover_oidc() -> Dict[str, str]:
-    try:
-        r = requests.get(DISCOVERY_URL, timeout=30)
-        if r.ok:
-            return r.json()
-    except Exception:
-        pass
-    # fallback if discovery is unavailable
-    return {
-        "authorization_endpoint": f"{OIDC_ISSUER}/authorize",
-        "token_endpoint":         f"{OIDC_ISSUER}/token",
-        "userinfo_endpoint":      f"{OIDC_ISSUER}/userinfo",
-        "issuer":                  OIDC_ISSUER,
-    }
-
-_oidc        = _discover_oidc()
-AUTH_URL     = _oidc.get("authorization_endpoint")
-TOKEN_URL    = _oidc.get("token_endpoint")
-USERINFO_URL = _oidc.get("userinfo_endpoint")
-ISSUER       = _oidc.get("issuer", OIDC_ISSUER)
-
-API_BASE = _get("BEXIO_API_BASE", "https://api.bexio.com/2.0")
-MANUAL_ENTRY_ENDPOINT = _get("BEXIO_MANUAL_ENTRY_ENDPOINT", "/accounting/manual_entries")
+# Keep scopes minimal first; you can add accounting_edit later in the UI box
+SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access")
 
 
 
@@ -345,11 +324,10 @@ def _exchange_code_for_token(code: str) -> bool:
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": REDIRECT_URI,
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
     }
     try:
-        r = requests.post(TOKEN_URL, data=data, timeout=30)
+        # bexio expects client credentials via HTTP Basic
+        r = requests.post(TOKEN_URL, data=data, auth=(CLIENT_ID, CLIENT_SECRET), timeout=30)
     except Exception as e:
         st.error(f"OAuth exchange failed (network): {e}")
         return False
@@ -362,13 +340,14 @@ def _exchange_code_for_token(code: str) -> bool:
             return False
         return True
 
-    # Non-2xx: surface provider error payload if present
+    # surface provider error
     try:
         err = r.json()
     except Exception:
         err = {"error": r.text[:400]}
     st.error(f"OAuth exchange failed: {r.status_code} {err}")
     return False
+
 
 
 def _api_headers() -> Dict[str, str]:
