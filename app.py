@@ -432,36 +432,46 @@ def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
         return False, f"422 Validation error: {r.text}"
     return False, f"{r.status_code} {r.reason}: {r.text[:800]}"
 
-
-
 def _exchange_code_for_token(code: str) -> bool:
-    data = {
+    base_form = {
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": REDIRECT_URI,
+        "client_id": CLIENT_ID,  # include even with Basic (Keycloak-safe)
     }
     try:
-        # bexio expects client credentials via HTTP Basic
-        r = requests.post(TOKEN_URL, data=data, auth=(CLIENT_ID, CLIENT_SECRET), timeout=30)
+        # Try HTTP Basic first
+        r = requests.post(TOKEN_URL, data=base_form, auth=(CLIENT_ID, CLIENT_SECRET), timeout=30)
+        if not r.ok:
+            # Fallback to client_secret_post (no Basic)
+            form2 = dict(base_form)
+            form2["client_secret"] = CLIENT_SECRET
+            r = requests.post(TOKEN_URL, data=form2, timeout=30)
     except Exception as e:
         st.error(f"OAuth exchange failed (network): {e}")
         return False
 
     if r.ok:
         try:
-            _save_token(r.json())
+            tok = r.json()
+            # sanity check
+            if not tok.get("access_token"):
+                st.error(f"OAuth exchange failed: missing access_token in response: {tok}")
+                return False
+            _save_token(tok)
         except Exception:
             st.error(f"OAuth exchange failed: invalid JSON in token response: {r.text[:400]}")
             return False
         return True
 
-    # surface provider error
+    # show server error
     try:
         err = r.json()
     except Exception:
         err = {"error": r.text[:400]}
     st.error(f"OAuth exchange failed: {r.status_code} {err}")
     return False
+
 
 def row_to_manual_entry(row: pd.Series) -> Dict:
     # Date
@@ -608,6 +618,16 @@ with st.expander("Diagnostics: OIDC endpoints"):
 
     test_auth_url = _auth_link(scopes=scopes_input)
     st.write({"auth_url": test_auth_url})
+
+with st.expander("Auth status"):
+    tok = st.session_state.get("bexio_token")
+    st.write({
+        "has_token": bool(tok),
+        "token_valid": _token_valid(),
+        "expires_at": getattr(tok, "expires_at", None),
+        "now": time.time(),
+        "scopes(decoded)": _current_scopes() or "(n/a)",
+    })
 
 
 # ──────────────────────────────────────────────────────────────────────────────
