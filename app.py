@@ -61,10 +61,7 @@ CLIENT_ID     = _get("BEXIO_CLIENT_ID",     HARDCODED_CLIENT_ID)
 CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", HARDCODED_CLIENT_SECRET)
 REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
-SCOPES = _get(
-    "BEXIO_SCOPES",
-    "openid profile email offline_access",
-)
+SCOPES = "openid profile email offline_access kb_invoice_edit bank_payment_edit accounting_edit"
 
 
 # Fail fast if empty or still placeholders
