@@ -258,56 +258,6 @@ with st.expander("Load a different CSV/XLSX into the editor"):
         st.session_state["editor_df"] = df_in
         st.rerun()
 
-
-
-
-def _json_safe(obj):
-    """Recursively convert pandas/numpy/scalars to JSON-serializable Python types."""
-    import math
-    try:
-        import numpy as np
-        import pandas as pd
-    except Exception:
-        np = None
-        pd = None
-
-    # None / simple types
-    if obj is None or isinstance(obj, (str, bool, int, float)):
-        # guard against non-finite floats
-        if isinstance(obj, float) and not math.isfinite(obj):
-            return None
-        return obj
-
-    # pandas NA / numpy NaN
-    try:
-        if pd is not None and pd.isna(obj):
-            return None
-    except Exception:
-        pass
-
-    # numpy scalars
-    if np is not None:
-        if isinstance(obj, (getattr(np, "integer", ()),)):
-            return int(obj)
-        if isinstance(obj, (getattr(np, "floating", ()),)):
-            f = float(obj)
-            return f if math.isfinite(f) else None
-
-    # datetime-like
-    from datetime import date, datetime
-    if isinstance(obj, (date, datetime)):
-        return obj.isoformat()
-
-    # containers
-    if isinstance(obj, dict):
-        return {str(k): _json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple, set)):
-        return [_json_safe(v) for v in obj]
-
-    # fallback
-    return str(obj)
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # OAuth utilities
 # ──────────────────────────────────────────────────────────────────────────────
@@ -415,17 +365,15 @@ def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
     headers = _api_headers()
     if "Authorization" not in headers:
         return False, "Not authenticated (OAuth missing)"
-    headers["Content-Type"] = "application/json"
-
     url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"
-    safe_payload = _json_safe(payload)  # belt-and-braces
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
 
-    r = requests.post(url, headers=headers, json=safe_payload, timeout=30)
     if r.ok:
         return True, r.text
 
     if r.status_code == 403:
-        return False, ("403 Forbidden – missing 'accounting_edit' scope or no accounting rights in selected company.")
+        return False, ("403 Forbidden – your token likely lacks 'accounting_edit' "
+                       "or the selected bexio company doesn’t grant accounting rights.")
     if r.status_code == 401:
         return False, "401 Unauthorized – token expired/invalid. Reconnect."
     if r.status_code == 422:
@@ -464,6 +412,11 @@ def _exchange_code_for_token(code: str) -> bool:
     return False
 
 def row_to_manual_entry(row: pd.Series) -> Dict:
+    """
+    Build a bexio v2 manual entry payload from one edited grid row.
+    Matches your current API_BASE='https://api.bexio.com/2.0'
+    and MANUAL_ENTRY_ENDPOINT='/accounting/manual_entries'.
+    """
     # Date
     date_str = str(row.get("Datum", "")).strip()
     try:
@@ -471,49 +424,44 @@ def row_to_manual_entry(row: pd.Series) -> Dict:
     except Exception:
         date_iso = None
 
-    # Amount (abs, 2 decimals) as plain float
+    # Amount (absolute, 2 decimals)
     raw_amt = row.get("Betrag", "")
     try:
         amt = float(str(raw_amt).replace("'", "").replace(",", ".")) if raw_amt != "" else 0.0
     except Exception:
         amt = 0.0
-    amt_abs = round(abs(float(amt)), 2)
+    amt_abs = round(abs(amt), 2)
 
-    # Accounts as simple strings
+    # Accounts as strings (v2 accepts account numbers as strings)
     soll  = (str(row.get("Soll", "")).strip() or "")
     haben = (str(row.get("Haben", "")).strip() or "")
-
     # Optional fields
     currency = (str(row.get("Währung", "CHF")).strip() or "CHF")
-    fx_raw   = str(row.get("Wechselkurs", "")).strip()
-    try:
-        exchange_rate = float(fx_raw) if fx_raw else None
-    except Exception:
-        exchange_rate = None
+    fx = (str(row.get("Wechselkurs", "")).strip() or "")
     desc = (str(row.get("Beschreibung", "")).strip() or "")
     ref  = (str(row.get("Belegnummer", "")).strip() or "")
 
     payload = {
-        "date": date_iso,
-        "text": desc or None,
-        "currency_code": currency,
-        "exchange_rate": exchange_rate,  # numeric or None
+        "date": date_iso,                     # "YYYY-MM-DD"
+        "text": desc or None,                 # description
+        "currency_code": currency,            # e.g. "CHF"
+        "exchange_rate": fx or None,          # e.g. "1" or None
         "lines": [
-            {"account_id": soll,  "debit": float(amt_abs), "credit": 0.0},
-            {"account_id": haben, "debit": 0.0,            "credit": float(amt_abs)},
+            {"account_id": soll,  "debit":  amt_abs, "credit": 0.0},
+            {"account_id": haben, "debit":  0.0,     "credit": amt_abs},
         ],
-        "external_reference": ref or None,
+        "external_reference": ref or None,    # your Belegnummer
+        # You can add VAT fields if present:
         # "vat_code": (str(row.get("MWST Code", "")).strip() or None),
         # "vat_account": (str(row.get("MWST Konto", "")).strip() or None),
     }
 
-    # remove empties, then sanitize for JSON
+    # Strip empty values
     def _clean(d: Dict) -> Dict:
         return {k: v for k, v in d.items() if v not in ("", None, [], {})}
     payload = _clean(payload)
     payload["lines"] = [_clean(l) for l in payload.get("lines", [])]
-
-    return _json_safe(payload)
+    return payload
 
 
 def _api_headers() -> Dict[str, str]:
@@ -671,4 +619,3 @@ else:
                 for e in errors:
                     st.write(f"Row {e['row']}: {e['error']}")
                     st.code(json.dumps(e["payload"], ensure_ascii=False, indent=2))
-
