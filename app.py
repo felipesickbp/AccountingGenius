@@ -166,8 +166,7 @@ def api_smoke():
     url = f"{API_BASE}/kb_invoice?limit=1"
     r = requests.get(url, headers=_api_headers(), timeout=15)
     st.write({"smoke_status": r.status_code, "ok": r.ok})
-    if not r.ok:
-        st.write(r.text)
+    st.text(r.text[:1000])  # show server’s hint
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -403,17 +402,17 @@ def _refresh_token_if_needed():
 
 def _auth_link(force_login: bool = False, scopes: Optional[str] = None) -> str:
     from urllib.parse import urlencode
-    scope_str = (scopes or SCOPES).strip()
+    scope_str = (scopes or "openid profile email offline_access").strip()
     params = {
         "response_type": "code",
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
         "scope": scope_str,
-        "state": str(int(time.time())),  # ok to keep simple
+        "state": str(int(time.time())),
+        # These two help: force account+company picker & a new consent screen
+        "prompt": "login consent",
     }
-    if force_login:
-        params["prompt"] = "login"
-    base = AUTH_URL or f"{OIDC_ISSUER}/protocol/openid-connect/auth"
+    base = AUTH_URL  # realm-based auth URL you already discovered
     return f"{base}?{urlencode(params)}"
 
 
@@ -687,6 +686,33 @@ with st.expander("Auth status"):
         "now": time.time(),
         "scopes(decoded)": _current_scopes() or "(n/a)",
     })
+with st.expander("Token claims (debug)"):
+    tok = st.session_state.get("bexio_token")
+    if not tok:
+        st.write("No token")
+    else:
+        parts = tok.access_token.split(".")
+        if len(parts) == 3:
+            import base64, json
+            def b64url(s): s += "=" * (-len(s) % 4); return base64.urlsafe_b64decode(s.encode())
+            try:
+                header  = json.loads(b64url(parts[0]).decode())
+                payload = json.loads(b64url(parts[1]).decode())
+                st.json({
+                    "iss": payload.get("iss"),
+                    "aud": payload.get("aud"),
+                    "azp": payload.get("azp"),
+                    "scope": payload.get("scope"),
+                    "resource_access": payload.get("resource_access"),
+                    "realm_access": payload.get("realm_access"),
+                    "exp": payload.get("exp"),
+                    # sometimes a company/org id is exposed; show a few commonly-used keys
+                    "company": payload.get("company") or payload.get("tenant") or payload.get("org") or payload.get("bexio_company_id"),
+                })
+            except Exception as e:
+                st.write(f"JWT decode error: {e}")
+        else:
+            st.write("Token is not a JWT?")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
