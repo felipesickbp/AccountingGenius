@@ -70,12 +70,7 @@ if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIE
     st.error("Missing BEXIO_CLIENT_ID / BEXIO_CLIENT_SECRET. Fill the HARDCODED_* values or set Streamlit secrets.")
     st.stop()
 
-# Auth endpoints (no discovery – bexio doesn't publish one at the root)
-OIDC_ISSUER  = "https://auth.bexio.com"
-AUTH_URL     = "https://auth.bexio.com/authorize"
-TOKEN_URL    = "https://auth.bexio.com/token"
-USERINFO_URL = "https://auth.bexio.com/userinfo"
-ISSUER       = OIDC_ISSUER
+
 
 # Keep scopes minimal first; you can add accounting_edit later in the UI box
 SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access")
@@ -267,9 +262,31 @@ with st.expander("Load a different CSV/XLSX into the editor"):
 # OAuth utilities
 # ──────────────────────────────────────────────────────────────────────────────
 
-# OIDC discovery on the current issuer (Keycloak realm "bexio")
+# --- OIDC (bexio Keycloak realm) ---
 OIDC_ISSUER = _get("BEXIO_OIDC_ISSUER", "https://auth.bexio.com/realms/bexio")
 DISCOVERY_URL = f"{OIDC_ISSUER}/.well-known/openid-configuration"
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _discover_oidc() -> Dict[str, str]:
+    try:
+        r = requests.get(DISCOVERY_URL, timeout=15)
+        if r.ok:
+            return r.json()
+    except Exception:
+        pass
+    # Fallback to known Keycloak paths
+    return {
+        "authorization_endpoint": f"{OIDC_ISSUER}/protocol/openid-connect/auth",
+        "token_endpoint":         f"{OIDC_ISSUER}/protocol/openid-connect/token",
+        "userinfo_endpoint":      f"{OIDC_ISSUER}/protocol/openid-connect/userinfo",
+        "issuer":                 OIDC_ISSUER,
+    }
+
+_oidc        = _discover_oidc()
+AUTH_URL     = _oidc["authorization_endpoint"]
+TOKEN_URL    = _oidc["token_endpoint"]
+USERINFO_URL = _oidc["userinfo_endpoint"]
+ISSUER       = _oidc.get("issuer", OIDC_ISSUER)
 
 
 @dataclass
@@ -316,7 +333,7 @@ def _auth_link(force_login: bool = False, scopes: Optional[str] = None) -> str:
     }
     if force_login:
         params["prompt"] = "login"
-    base = AUTH_URL or f"{OIDC_ISSUER}/authorize"
+    base = AUTH_URL or f"{OIDC_ISSUER}/protocol/openid-connect/auth"
     return f"{base}?{urlencode(params)}"
 
 
