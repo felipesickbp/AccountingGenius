@@ -62,7 +62,8 @@ CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", HARDCODED_CLIENT_SECRET)
 REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
 # This is the minimum set for login + posting manual entries
-SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access accounting_edit")
+SCOPES = "openid profile email offline_access"   # ← no accounting_edit here
+
 
 
 # Bexio REST base + endpoint for manual journal entries (v2)
@@ -160,6 +161,14 @@ def finalise(df: pd.DataFrame, first_no: int) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = ""
     return df[TEMPLATE_ORDER]
+
+def api_smoke():
+    url = f"{API_BASE}/kb_invoice?limit=1"
+    r = requests.get(url, headers=_api_headers(), timeout=15)
+    st.write({"smoke_status": r.status_code, "ok": r.ok})
+    if not r.ok:
+        st.write(r.text)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Import + Process → directly feed the editor
@@ -411,26 +420,49 @@ def _auth_link(force_login: bool = False, scopes: Optional[str] = None) -> str:
 def _is_authenticated() -> bool:
     return _token_valid()
   
-def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
+KNOWN_MANUAL_ENDPOINTS = [
+    "/accounting/manual_entries",         # what you tried (likely not public)
+    "/accounting/journal_entries",        # sometimes used naming
+    "/accounting/manual-entries",         # v3-ish naming in some stacks
+]
+
+def post_manual_entry(payload: dict) -> tuple[bool, str]:
     headers = _api_headers()
     if "Authorization" not in headers:
-        return False, "Not authenticated (OAuth missing)"
+        return False, "Not authenticated"
+
     headers["Content-Type"] = "application/json"
+    safe_payload = _json_safe(payload)
 
-    url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"
-    safe_payload = _json_safe(payload)  # belt-and-braces
+    # one-time smoke test to confirm token/base work
+    try:
+        smoke = requests.get(f"{API_BASE}/kb_invoice?limit=1", headers=headers, timeout=10)
+        if smoke.status_code in (401, 403):
+            return False, f"{smoke.status_code} on smoke test – token lacks API access"
+    except Exception as e:
+        return False, f"Smoke test failed: {e}"
 
-    r = requests.post(url, headers=headers, json=safe_payload, timeout=30)
-    if r.ok:
-        return True, r.text
+    # try a few known paths exactly once
+    for path in KNOWN_MANUAL_ENDPOINTS:
+        url = f"{API_BASE}{path}"
+        r = requests.post(url, headers=headers, json=safe_payload, timeout=30)
+        if r.status_code == 404:
+            # keep trying alternatives
+            continue
+        if r.ok:
+            return True, r.text
+        if r.status_code == 403:
+            return False, "403 – your app/user lacks Accounting (edit) for this company"
+        if r.status_code == 422:
+            return False, f"422 validation: {r.text}"
+        return False, f"{r.status_code} {r.reason}: {r.text[:800]}"
 
-    if r.status_code == 403:
-        return False, ("403 Forbidden – missing 'accounting_edit' scope or no accounting rights in selected company.")
-    if r.status_code == 401:
-        return False, "401 Unauthorized – token expired/invalid. Reconnect."
-    if r.status_code == 422:
-        return False, f"422 Validation error: {r.text}"
-    return False, f"{r.status_code} {r.reason}: {r.text[:800]}"
+    # all tried endpoints were 404
+    return False, ("404 Not Found for all known endpoints. This usually means the "
+                   "Manual Journal Entry route isn’t enabled for public developer apps. "
+                   "Ask bexio support to confirm availability or partner access for "
+                   "manual journal posting, or use an alternative workflow.")
+
 
 def _exchange_code_for_token(code: str) -> bool:
     base_form = {
