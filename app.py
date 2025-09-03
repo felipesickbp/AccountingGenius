@@ -52,8 +52,8 @@ def _get(name: str, default: Optional[str] = None):
     return st.secrets.get(name, os.getenv(name, default))
 
 # === Put YOUR real keys/URL here (or set them in Streamlit Secrets) ===
-HARDCODED_CLIENT_ID     = "9a1bbd33-58d9-48e6-8f87-d938d0f5215e"
-HARDCODED_CLIENT_SECRET = "B_d-wAUgzALrsYYyoR2-rv1df1X1mPNxlnDIKhuHM3yeke2h38CKTi2DIXeLSjkseTGXw3wxP0PISRryl_8KTQ"
+HARDCODED_CLIENT_ID     = "fe40a7f4-af9a-439d-ba6e-7fc83887c748"
+HARDCODED_CLIENT_SECRET = "AOEYq3mT-H9ol06ZTKsZfLtSS7wB5uYnOuz9LUwIsYGP4umiyDxJJDHm2blAR1tH3tSwFbuEnnE8N1zucwpO1rY"
 HARDCODED_REDIRECT_URI  = "https://accountinggenius-mdcq7sh8scyxglc7vvwcuh.streamlit.app"  # must match bexio app exactly
 
 # Resolved config (Secrets/env take precedence, else hardcoded)
