@@ -65,17 +65,15 @@ REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access accounting_edit")
 
 
+# Bexio REST base + endpoint for manual journal entries (v2)
+API_BASE = "https://api.bexio.com/2.0"
+MANUAL_ENTRY_ENDPOINT = "/accounting/manual_entries"
 
 
 # Fail fast if empty or still placeholders
 if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIENT_ID, CLIENT_SECRET)):
     st.error("Missing BEXIO_CLIENT_ID / BEXIO_CLIENT_SECRET. Fill the HARDCODED_* values or set Streamlit secrets.")
     st.stop()
-
-
-
-# Keep scopes minimal first; you can add accounting_edit later in the UI box
-SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access")
 
 
 
@@ -297,6 +295,8 @@ class Token:
     refresh_token: Optional[str]
     expires_at: float
 
+
+
 def _save_token(tok: Dict):
     st.session_state["bexio_token"] = Token(
         access_token=tok["access_token"],
@@ -360,24 +360,25 @@ def _auth_link(force_login: bool = False, scopes: Optional[str] = None) -> str:
 
 def _is_authenticated() -> bool:
     return _token_valid()
-
+  
 def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
     headers = _api_headers()
     if "Authorization" not in headers:
         return False, "Not authenticated (OAuth missing)"
     url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"
     r = requests.post(url, headers=headers, json=payload, timeout=30)
+
     if r.ok:
         return True, r.text
 
     if r.status_code == 403:
-        return False, ("403 Forbidden – Most likely your token is missing the 'accounting_edit' scope "
-                       "or the bexio company chosen during OAuth doesn’t grant you accounting rights.")
+        return False, ("403 Forbidden – your token likely lacks 'accounting_edit' "
+                       "or the selected bexio company doesn’t grant accounting rights.")
     if r.status_code == 401:
-        return False, "401 Unauthorized – token expired/invalid. Click Connect again."
+        return False, "401 Unauthorized – token expired/invalid. Reconnect."
     if r.status_code == 422:
         return False, f"422 Validation error: {r.text}"
-    return False, f"{r.status_code}: {r.text}"
+    return False, f"{r.status_code} {r.reason}: {r.text[:800]}"
 
 
 
