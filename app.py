@@ -61,7 +61,7 @@ CLIENT_ID     = _get("BEXIO_CLIENT_ID",     HARDCODED_CLIENT_ID)
 CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", HARDCODED_CLIENT_SECRET)
 REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
-:
+
 # Request OIDC + refresh + a harmless read scope you can smoke-test
 BASE_SCOPES = "openid offline_access contact_show"
 EXTRA_SCOPES_DEFAULT = ""  # add more later via the UI if needed
