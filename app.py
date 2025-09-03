@@ -62,7 +62,7 @@ CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", HARDCODED_CLIENT_SECRET)
 REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
 # one single definition, near the top:
-BASE_SCOPES = "openid profile email offline_access"   # minimal, safe default
+BASE_SCOPES = "openid"   # start minimal to avoid loops
 # Optional extra scopes (kept empty by default until confirmed in bexio dev portal)
 EXTRA_SCOPES_DEFAULT = ""   # e.g. "accounting_edit" once your app is allowed
 
@@ -169,19 +169,6 @@ def finalise(df: pd.DataFrame, first_no: int) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = ""
     return df[TEMPLATE_ORDER]
-
-def smoke_test():
-    headers = _api_headers()
-    url = f"{API_BASE}/users/me"   # or /companies if you prefer
-    r = requests.get(url, headers=headers, timeout=15)
-    return r.status_code, r.text[:400]
-
-if _token_valid():
-    code, txt = smoke_test()
-    st.caption(f"API smoke test: {code}")
-    if code != 200:
-        st.warning("Token is valid for login but not for the API. This usually means your app/client is not yet allowed to call the API or you’re missing the required API scope(s).")
-
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -367,6 +354,19 @@ class Token:
     access_token: str
     refresh_token: Optional[str]
     expires_at: float
+
+def smoke_test():
+    headers = _api_headers()
+    url = f"{API_BASE}/users/me"   # or /companies if you prefer
+    r = requests.get(url, headers=headers, timeout=15)
+    return r.status_code, r.text[:400]
+
+if _token_valid():
+    code, txt = smoke_test()
+    st.caption(f"API smoke test: {code}")
+    if code != 200:
+        st.warning("Token is valid for login but not for the API. This usually means your app/client is not yet allowed to call the API or you’re missing the required API scope(s).")
+
 
 
 
