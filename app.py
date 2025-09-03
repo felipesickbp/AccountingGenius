@@ -372,6 +372,57 @@ def _exchange_code_for_token(code: str) -> bool:
     st.error(f"OAuth exchange failed: {r.status_code} {err}")
     return False
 
+def row_to_manual_entry(row: pd.Series) -> Dict:
+    """
+    Build a bexio v2 manual entry payload from one edited grid row.
+    Matches your current API_BASE='https://api.bexio.com/2.0'
+    and MANUAL_ENTRY_ENDPOINT='/accounting/manual_entries'.
+    """
+    # Date
+    date_str = str(row.get("Datum", "")).strip()
+    try:
+        date_iso = datetime.strptime(date_str, "%d.%m.%Y").date().isoformat() if date_str else None
+    except Exception:
+        date_iso = None
+
+    # Amount (absolute, 2 decimals)
+    raw_amt = row.get("Betrag", "")
+    try:
+        amt = float(str(raw_amt).replace("'", "").replace(",", ".")) if raw_amt != "" else 0.0
+    except Exception:
+        amt = 0.0
+    amt_abs = round(abs(amt), 2)
+
+    # Accounts as strings (v2 accepts account numbers as strings)
+    soll  = (str(row.get("Soll", "")).strip() or "")
+    haben = (str(row.get("Haben", "")).strip() or "")
+    # Optional fields
+    currency = (str(row.get("Währung", "CHF")).strip() or "CHF")
+    fx = (str(row.get("Wechselkurs", "")).strip() or "")
+    desc = (str(row.get("Beschreibung", "")).strip() or "")
+    ref  = (str(row.get("Belegnummer", "")).strip() or "")
+
+    payload = {
+        "date": date_iso,                     # "YYYY-MM-DD"
+        "text": desc or None,                 # description
+        "currency_code": currency,            # e.g. "CHF"
+        "exchange_rate": fx or None,          # e.g. "1" or None
+        "lines": [
+            {"account_id": soll,  "debit":  amt_abs, "credit": 0.0},
+            {"account_id": haben, "debit":  0.0,     "credit": amt_abs},
+        ],
+        "external_reference": ref or None,    # your Belegnummer
+        # You can add VAT fields if present:
+        # "vat_code": (str(row.get("MWST Code", "")).strip() or None),
+        # "vat_account": (str(row.get("MWST Konto", "")).strip() or None),
+    }
+
+    # Strip empty values
+    def _clean(d: Dict) -> Dict:
+        return {k: v for k, v in d.items() if v not in ("", None, [], {})}
+    payload = _clean(payload)
+    payload["lines"] = [_clean(l) for l in payload.get("lines", [])]
+    return payload
 
 
 def _api_headers() -> Dict[str, str]:
