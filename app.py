@@ -561,12 +561,28 @@ st.header("Connect to bexio (auth.bexio.com)")
 
 with st.expander("OAuth debug"):
     st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
-    scopes_input = st.text_input(
-        "Scopes to request",
-        value=SCOPES,
-        help="If login fails, try: 'openid profile email offline_access' first."
+
+    preset = st.selectbox(
+        "Scope preset",
+        [
+            "openid",
+            "openid profile",
+            "openid profile email",
+            "openid accounting_edit",
+            "openid profile email accounting_edit",
+            # add offline_access only if you know your client has it:
+            # "openid profile email offline_access accounting_edit",
+        ],
+        index=0,
     )
-    st.code(_auth_link(scopes=scopes_input))  # show the exact URL
+    scopes_input = st.text_input(
+        "Scopes to request (space-separated)",
+        value=preset,
+        help="Start with 'openid'. Add others one by one once login succeeds."
+    )
+
+    st.code(_auth_link(scopes=scopes_input))
+
 
 left, right = st.columns([1, 1])
 with left:
@@ -592,6 +608,13 @@ with left:
 
 with right:
     qp = st.query_params
+    err = qp.get("error")
+    err_desc = qp.get("error_description")
+    if err:
+        st.error(f"OIDC error: {err} – {err_desc}")
+        # optional: clear the params so the page resets
+        # st.query_params.clear()
+
     code = qp.get("code")
     if isinstance(code, list):
         code = code[0]
@@ -599,6 +622,7 @@ with right:
         if _exchange_code_for_token(code):
             st.query_params.clear()
             st.rerun()
+
 
 with st.expander("Troubleshooting"):
     if st.button("Reset auth & clear caches"):
@@ -613,11 +637,14 @@ with st.expander("Diagnostics: OIDC endpoints"):
     try:
         r = requests.get(DISCOVERY_URL, timeout=10)
         st.write({"discovery_url": DISCOVERY_URL, "status": r.status_code, "ok": r.ok})
+        if r.ok:
+            disc = r.json()
+            st.write({"scopes_supported": disc.get("scopes_supported", [])})
+            st.write({"token_endpoint_auth_methods_supported": disc.get("token_endpoint_auth_methods_supported", [])})
     except Exception as e:
         st.write({"discovery_url": DISCOVERY_URL, "error": str(e)})
 
-    test_auth_url = _auth_link(scopes=scopes_input)
-    st.write({"auth_url": test_auth_url})
+    st.write({"auth_url": _auth_link(scopes=scopes_input)})
 
 with st.expander("Auth status"):
     tok = st.session_state.get("bexio_token")
