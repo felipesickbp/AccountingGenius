@@ -62,9 +62,9 @@ CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", HARDCODED_CLIENT_SECRET)
 REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
 
-# Request OIDC + refresh + a harmless read scope you can smoke-test
-BASE_SCOPES = "openid offline_access contact_show"
-EXTRA_SCOPES_DEFAULT = ""  # add more later via the UI if needed
+# add email + profile; keep offline_access + your existing read scope(s)
+BASE_SCOPES = "openid email profile offline_access contact_show"
+
 
 
 # Bexio REST base + endpoint for manual journal entries (v2)
@@ -356,13 +356,15 @@ class Token:
     expires_at: float
 
 
-
 def _save_token(tok: Dict):
     st.session_state["bexio_token"] = Token(
         access_token=tok["access_token"],
         refresh_token=tok.get("refresh_token"),
         expires_at=time.time() + int(tok.get("expires_in", 3600)) - 30,
     )
+    # NEW: keep id_token for claim fallback
+    st.session_state["bexio_id_token"] = tok.get("id_token")
+
 
 def _current_scopes() -> str:
     tok: Optional[Token] = st.session_state.get("bexio_token")
@@ -577,13 +579,40 @@ def _api_headers() -> Dict[str, str]:
 
 
 def get_userinfo() -> Optional[Dict]:
+    headers = _api_headers()
+
+    # 1) Try the userinfo endpoint
     try:
-        headers = _api_headers()
         r = requests.get(USERINFO_URL, headers=headers, timeout=30)
         if r.ok:
-            return r.json()
+            js = r.json()
+            if js:
+                return js
     except Exception as e:
         st.warning(f"userinfo failed: {e}")
+
+    # 2) Fallback to id_token claims
+    idt = st.session_state.get("bexio_id_token")
+    if idt:
+        try:
+            import base64, json
+            p = idt.split(".")[1]
+            p += "=" * (-len(p) % 4)
+            return json.loads(base64.urlsafe_b64decode(p.encode("utf-8")))
+        except Exception:
+            pass
+
+    # 3) Last fallback: decode access token payload for 'sub'
+    tok = st.session_state.get("bexio_token")
+    if tok and tok.access_token and "." in tok.access_token:
+        try:
+            import base64, json
+            parts = tok.access_token.split(".")
+            p = parts[1] + "=" * (-len(parts[1]) % 4)
+            return {"sub": json.loads(base64.urlsafe_b64decode(p.encode("utf-8"))).get("sub")}
+        except Exception:
+            pass
+
     return None
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -626,12 +655,16 @@ left, right = st.columns([1, 1])
 with left:
     tok_ok = _token_valid()   # safe to call now; helpers already defined below this line
     if not tok_ok:
-        st.link_button("🔗 Connect to bexio (OAuth)", _auth_link(scopes=scopes_input))
+        st.link_button("🔗 Connect to bexio (OAuth)", _auth_link(scopes=SCOPE_PRESET))
     else:
         st.success("Connected via OAuth")
-        info = get_userinfo() or {}
-        email = info.get("email") or info.get("preferred_username")
-        st.caption(f"Logged in as: {email or '—'}")
+                  who = (
+              info.get("email")
+              or info.get("preferred_username")
+              or info.get("name")
+              or info.get("sub")  # opaque user id fallback
+          )
+          st.caption(f"Logged in as: {who or '—'}")
 
         sc = _current_scopes()
         st.caption(f"Token scopes: {sc or '(unavailable)'}")
