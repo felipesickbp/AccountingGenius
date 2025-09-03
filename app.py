@@ -64,14 +64,19 @@ REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 # This is the minimum set for login + posting manual entries
 SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access accounting_edit")
 
+
+
+
 # Fail fast if empty or still placeholders
 if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIENT_ID, CLIENT_SECRET)):
     st.error("Missing BEXIO_CLIENT_ID / BEXIO_CLIENT_SECRET. Fill the HARDCODED_* values or set Streamlit secrets.")
     st.stop()
 
 
-API_BASE = _get("BEXIO_API_BASE", "https://api.bexio.com/2.0")
-MANUAL_ENTRY_ENDPOINT = _get("BEXIO_MANUAL_ENTRY_ENDPOINT", "/accounting/manual_entries")
+
+# Keep scopes minimal first; you can add accounting_edit later in the UI box
+SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access")
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -404,11 +409,12 @@ def _exchange_code_for_token(code: str) -> bool:
         err = {"error": r.text[:400]}
     st.error(f"OAuth exchange failed: {r.status_code} {err}")
     return False
+
 def row_to_manual_entry(row: pd.Series) -> Dict:
     """
     Build a bexio v2 manual entry payload from one edited grid row.
-    Works with API_BASE='https://api.bexio.com/2.0' and
-    MANUAL_ENTRY_ENDPOINT='/accounting/manual_entries'.
+    Matches your current API_BASE='https://api.bexio.com/2.0'
+    and MANUAL_ENTRY_ENDPOINT='/accounting/manual_entries'.
     """
     # Date
     date_str = str(row.get("Datum", "")).strip()
@@ -425,32 +431,31 @@ def row_to_manual_entry(row: pd.Series) -> Dict:
         amt = 0.0
     amt_abs = round(abs(amt), 2)
 
-    # Accounts (v2 accepts account numbers as strings)
+    # Accounts as strings (v2 accepts account numbers as strings)
     soll  = (str(row.get("Soll", "")).strip() or "")
     haben = (str(row.get("Haben", "")).strip() or "")
-
     # Optional fields
     currency = (str(row.get("Währung", "CHF")).strip() or "CHF")
-    fx       = (str(row.get("Wechselkurs", "")).strip() or "")
-    desc     = (str(row.get("Beschreibung", "")).strip() or "")
-    ref      = (str(row.get("Belegnummer", "")).strip() or "")
+    fx = (str(row.get("Wechselkurs", "")).strip() or "")
+    desc = (str(row.get("Beschreibung", "")).strip() or "")
+    ref  = (str(row.get("Belegnummer", "")).strip() or "")
 
     payload = {
-        "date": date_iso,                 # "YYYY-MM-DD"
-        "text": desc or None,
-        "currency_code": currency,        # e.g. "CHF"
-        "exchange_rate": fx or None,      # e.g. "1" or None
+        "date": date_iso,                     # "YYYY-MM-DD"
+        "text": desc or None,                 # description
+        "currency_code": currency,            # e.g. "CHF"
+        "exchange_rate": fx or None,          # e.g. "1" or None
         "lines": [
-            {"account_id": soll,  "debit": amt_abs, "credit": 0.0},
-            {"account_id": haben, "debit": 0.0,     "credit": amt_abs},
+            {"account_id": soll,  "debit":  amt_abs, "credit": 0.0},
+            {"account_id": haben, "debit":  0.0,     "credit": amt_abs},
         ],
-        "external_reference": ref or None,
-        # Add VAT if you populate those columns:
+        "external_reference": ref or None,    # your Belegnummer
+        # You can add VAT fields if present:
         # "vat_code": (str(row.get("MWST Code", "")).strip() or None),
         # "vat_account": (str(row.get("MWST Konto", "")).strip() or None),
     }
 
-    # Strip empties
+    # Strip empty values
     def _clean(d: Dict) -> Dict:
         return {k: v for k, v in d.items() if v not in ("", None, [], {})}
     payload = _clean(payload)
@@ -613,5 +618,4 @@ else:
                 for e in errors:
                     st.write(f"Row {e['row']}: {e['error']}")
                     st.code(json.dumps(e["payload"], ensure_ascii=False, indent=2))
-
 
