@@ -61,10 +61,8 @@ CLIENT_ID     = _get("BEXIO_CLIENT_ID",     HARDCODED_CLIENT_ID)
 CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", HARDCODED_CLIENT_SECRET)
 REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
-
-# add email + profile; keep offline_access + your existing read scope(s)
-BASE_SCOPES = "openid email profile offline_access contact_show"
-
+# This is the minimum set for login + posting manual entries
+SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access accounting_edit")
 
 
 # Bexio REST base + endpoint for manual journal entries (v2)
@@ -84,13 +82,6 @@ if any(x in (None, "", "MY_CLIENT_ID_HERE", "MY_SECRET_KEY_HERE") for x in (CLIE
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Bank ↦ Ledger (+ Excel editor + bexio)", layout="wide")
 st.title("Bank Statement → Ledger CSV · Excel editor · bexio posting")
-qp = st.query_params
-err = qp.get("error")
-err_desc = qp.get("error_description")
-if err:
-    st.error(f"OAuth error: {err} — {err_desc or ''}")
-    # optional: offer a “Retry with minimal scopes” button
-
 
 
 # init editor/posting state
@@ -169,7 +160,6 @@ def finalise(df: pd.DataFrame, first_no: int) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = ""
     return df[TEMPLATE_ORDER]
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Import + Process → directly feed the editor
@@ -356,15 +346,13 @@ class Token:
     expires_at: float
 
 
+
 def _save_token(tok: Dict):
     st.session_state["bexio_token"] = Token(
         access_token=tok["access_token"],
         refresh_token=tok.get("refresh_token"),
         expires_at=time.time() + int(tok.get("expires_in", 3600)) - 30,
     )
-    # NEW: keep id_token for claim fallback
-    st.session_state["bexio_id_token"] = tok.get("id_token")
-
 
 def _current_scopes() -> str:
     tok: Optional[Token] = st.session_state.get("bexio_token")
@@ -383,6 +371,7 @@ def _current_scopes() -> str:
         return payload.get("scope", "")
     except Exception:
         return ""
+
 
 def _token_valid() -> bool:
     tok: Optional[Token] = st.session_state.get("bexio_token")
@@ -405,116 +394,74 @@ def _refresh_token_if_needed():
 
 def _auth_link(force_login: bool = False, scopes: Optional[str] = None) -> str:
     from urllib.parse import urlencode
-    scope_str = (scopes or BASE_SCOPES).strip()
+    scope_str = (scopes or SCOPES).strip()
     params = {
         "response_type": "code",
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
         "scope": scope_str,
-        "state": str(int(time.time())),
-        # optional but recommended if you want refresh tokens reliably:
-        "access_type": "offline",
-        "prompt": "consent" if "offline_access" in scope_str else None,
+        "state": str(int(time.time())),  # ok to keep simple
     }
-    params = {k: v for k, v in params.items() if v is not None}
+    if force_login:
+        params["prompt"] = "login"
     base = AUTH_URL or f"{OIDC_ISSUER}/protocol/openid-connect/auth"
     return f"{base}?{urlencode(params)}"
+
 
 def _is_authenticated() -> bool:
     return _token_valid()
   
-KNOWN_MANUAL_ENDPOINTS = [
-    "/accounting/manual_entries",         # what you tried (likely not public)
-    "/accounting/journal_entries",        # sometimes used naming
-    "/accounting/manual-entries",         # v3-ish naming in some stacks
-]
-
-def smoke_test():
-    headers = _api_headers()
-    # Use an endpoint that matches the scopes you requested
-    url = f"{API_BASE}/contact?limit=1"
-    r = requests.get(url, headers=headers, timeout=15)
-    return r.status_code, r.text[:400]
-
-
-def post_manual_entry(payload: dict) -> tuple[bool, str]:
+def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
     headers = _api_headers()
     if "Authorization" not in headers:
-        return False, "Not authenticated"
-
+        return False, "Not authenticated (OAuth missing)"
     headers["Content-Type"] = "application/json"
-    safe_payload = _json_safe(payload)
 
-    # one-time smoke test to confirm token/base work
-    try:
-        smoke = requests.get(f"{API_BASE}/kb_invoice?limit=1", headers=headers, timeout=10)
-        if smoke.status_code in (401, 403):
-            return False, f"{smoke.status_code} on smoke test – token lacks API access"
-    except Exception as e:
-        return False, f"Smoke test failed: {e}"
+    url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"
+    safe_payload = _json_safe(payload)  # belt-and-braces
 
-    # try a few known paths exactly once
-    for path in KNOWN_MANUAL_ENDPOINTS:
-        url = f"{API_BASE}{path}"
-        r = requests.post(url, headers=headers, json=safe_payload, timeout=30)
-        if r.status_code == 404:
-            # keep trying alternatives
-            continue
-        if r.ok:
-            return True, r.text
-        if r.status_code == 403:
-            return False, "403 – your app/user lacks Accounting (edit) for this company"
-        if r.status_code == 422:
-            return False, f"422 validation: {r.text}"
-        return False, f"{r.status_code} {r.reason}: {r.text[:800]}"
+    r = requests.post(url, headers=headers, json=safe_payload, timeout=30)
+    if r.ok:
+        return True, r.text
 
-    # all tried endpoints were 404
-    return False, ("404 Not Found for all known endpoints. This usually means the "
-                   "Manual Journal Entry route isn’t enabled for public developer apps. "
-                   "Ask bexio support to confirm availability or partner access for "
-                   "manual journal posting, or use an alternative workflow.")
+    if r.status_code == 403:
+        return False, ("403 Forbidden – missing 'accounting_edit' scope or no accounting rights in selected company.")
+    if r.status_code == 401:
+        return False, "401 Unauthorized – token expired/invalid. Reconnect."
+    if r.status_code == 422:
+        return False, f"422 Validation error: {r.text}"
+    return False, f"{r.status_code} {r.reason}: {r.text[:800]}"
+
 
 
 def _exchange_code_for_token(code: str) -> bool:
-    base_form = {
+    data = {
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": REDIRECT_URI,
-        "client_id": CLIENT_ID,  # include even with Basic (Keycloak-safe)
     }
     try:
-        # Try HTTP Basic first
-        r = requests.post(TOKEN_URL, data=base_form, auth=(CLIENT_ID, CLIENT_SECRET), timeout=30)
-        if not r.ok:
-            # Fallback to client_secret_post (no Basic)
-            form2 = dict(base_form)
-            form2["client_secret"] = CLIENT_SECRET
-            r = requests.post(TOKEN_URL, data=form2, timeout=30)
+        # bexio expects client credentials via HTTP Basic
+        r = requests.post(TOKEN_URL, data=data, auth=(CLIENT_ID, CLIENT_SECRET), timeout=30)
     except Exception as e:
         st.error(f"OAuth exchange failed (network): {e}")
         return False
 
     if r.ok:
         try:
-            tok = r.json()
-            # sanity check
-            if not tok.get("access_token"):
-                st.error(f"OAuth exchange failed: missing access_token in response: {tok}")
-                return False
-            _save_token(tok)
+            _save_token(r.json())
         except Exception:
             st.error(f"OAuth exchange failed: invalid JSON in token response: {r.text[:400]}")
             return False
         return True
 
-    # show server error
+    # surface provider error
     try:
         err = r.json()
     except Exception:
         err = {"error": r.text[:400]}
     st.error(f"OAuth exchange failed: {r.status_code} {err}")
     return False
-
 
 def row_to_manual_entry(row: pd.Series) -> Dict:
     # Date
@@ -578,41 +525,22 @@ def _api_headers() -> Dict[str, str]:
     return headers
 
 
-def get_userinfo() -> Optional[Dict]:
-    headers = _api_headers()
+    # OAuth fallback
+    _refresh_token_if_needed()
+    tok: Token = st.session_state.get("bexio_token")  # may be None
+    if not tok:
+        # No PAT and no OAuth token yet
+        return {"Accept": "application/json"}
+    return {"Accept": "application/json", "Authorization": f"Bearer {tok.access_token}"}
 
-    # 1) Try the userinfo endpoint
+def get_userinfo() -> Optional[Dict]:
     try:
+        headers = _api_headers()
         r = requests.get(USERINFO_URL, headers=headers, timeout=30)
         if r.ok:
-            js = r.json()
-            if js:
-                return js
+            return r.json()
     except Exception as e:
         st.warning(f"userinfo failed: {e}")
-
-    # 2) Fallback to id_token claims
-    idt = st.session_state.get("bexio_id_token")
-    if idt:
-        try:
-            import base64, json
-            p = idt.split(".")[1]
-            p += "=" * (-len(p) % 4)
-            return json.loads(base64.urlsafe_b64decode(p.encode("utf-8")))
-        except Exception:
-            pass
-
-    # 3) Last fallback: decode access token payload for 'sub'
-    tok = st.session_state.get("bexio_token")
-    if tok and tok.access_token and "." in tok.access_token:
-        try:
-            import base64, json
-            parts = tok.access_token.split(".")
-            p = parts[1] + "=" * (-len(parts[1]) % 4)
-            return {"sub": json.loads(base64.urlsafe_b64decode(p.encode("utf-8"))).get("sub")}
-        except Exception:
-            pass
-
     return None
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -623,75 +551,37 @@ st.header("Connect to bexio (auth.bexio.com)")
 
 with st.expander("OAuth debug"):
     st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
-
-    preset = st.selectbox(
-    "Scope preset",
-    [
-        "openid offline_access contact_show",
-        "openid offline_access contact_show kb_invoice_show",
-        "openid offline_access contact_show bank_account_show",
-        "openid offline_access all",
-    ],
-    index=0,
-)
-
     scopes_input = st.text_input(
-        "Scopes to request (space-separated)",
-        value=preset,
-        help="Start with 'openid'. Add others one by one once login succeeds."
+        "Scopes to request",
+        value=SCOPES,
+        help="If login fails, try: 'openid profile email offline_access' first."
     )
-
-    st.code(_auth_link(scopes=scopes_input))
-with st.expander("OAuth debug"):
-    st.write({"issuer": ISSUER, "redirect_uri": REDIRECT_URI})
-    extra = st.text_input("Extra scopes (advanced)", value=EXTRA_SCOPES_DEFAULT)
-    effective_scopes = (BASE_SCOPES + " " + extra).strip() if extra else BASE_SCOPES
-    st.code(_auth_link(scopes=effective_scopes))
-
-
-# keep your smoke_test() definition where it is, but do NOT call it at top level
+    st.code(_auth_link(scopes=scopes_input))  # show the exact URL
 
 left, right = st.columns([1, 1])
 with left:
-    tok_ok = _token_valid()  # safe to call now; helpers already defined below this line
-    if not tok_ok:
-        st.link_button("🔗 Connect to bexio (OAuth)", _auth_link(scopes=SCOPE_PRESET))
+    if not _token_valid():
+        st.link_button("🔗 Connect to bexio (OAuth)", _auth_link(scopes=scopes_input))
     else:
         st.success("Connected via OAuth")
+        info = get_userinfo() or {}
+        email = info.get("email") or info.get("preferred_username")
+        st.caption(f"Logged in as: {email or '—'}")
 
-        who = (
-            info.get("email")
-            or info.get("preferred_username")
-            or info.get("name")
-            or info.get("sub")  # opaque user id fallback
-        )
-        st.caption(f"Logged in as: {who or '—'}")
-
+        # NEW: show scopes on the current token
         sc = _current_scopes()
-        st.caption(f"Token scopes: {sc or '(unavailable)'}")
+        if sc:
+            st.caption(f"Token scopes: {sc}")
+        else:
+            st.caption("Token scopes: (unavailable)")
 
-        # 🔹 run smoke test here instead of at top level
-        code, txt = smoke_test()
-        st.caption(f"API smoke test: {code}")
-        if code != 200:
-            st.warning(
-                "Token is valid for login but not for the API. This usually means your app/client "
-                "is not yet allowed to call the API or the required API scope(s) are missing."
-            )
-
+        st.link_button("Switch company (re-login)", _auth_link(force_login=True, scopes=scopes_input))
 
     st.caption(f"Issuer: {ISSUER}")
     st.caption(f"Redirect: {REDIRECT_URI}")
 
 with right:
     qp = st.query_params
-    err = qp.get("error")
-    err_desc = qp.get("error_description")
-    if err:
-        st.error(f"OIDC error: {err} – {err_desc}")
-        # optional: clear the params so the page resets
-        # st.query_params.clear()
-
     code = qp.get("code")
     if isinstance(code, list):
         code = code[0]
@@ -699,7 +589,6 @@ with right:
         if _exchange_code_for_token(code):
             st.query_params.clear()
             st.rerun()
-
 
 with st.expander("Troubleshooting"):
     if st.button("Reset auth & clear caches"):
@@ -714,51 +603,11 @@ with st.expander("Diagnostics: OIDC endpoints"):
     try:
         r = requests.get(DISCOVERY_URL, timeout=10)
         st.write({"discovery_url": DISCOVERY_URL, "status": r.status_code, "ok": r.ok})
-        if r.ok:
-            disc = r.json()
-            st.write({"scopes_supported": disc.get("scopes_supported", [])})
-            st.write({"token_endpoint_auth_methods_supported": disc.get("token_endpoint_auth_methods_supported", [])})
     except Exception as e:
         st.write({"discovery_url": DISCOVERY_URL, "error": str(e)})
 
-    st.write({"auth_url": _auth_link(scopes=scopes_input)})
-
-with st.expander("Auth status"):
-    tok = st.session_state.get("bexio_token")
-    st.write({
-        "has_token": bool(tok),
-        "token_valid": _token_valid(),
-        "expires_at": getattr(tok, "expires_at", None),
-        "now": time.time(),
-        "scopes(decoded)": _current_scopes() or "(n/a)",
-    })
-with st.expander("Token claims (debug)"):
-    tok = st.session_state.get("bexio_token")
-    if not tok:
-        st.write("No token")
-    else:
-        parts = tok.access_token.split(".")
-        if len(parts) == 3:
-            import base64, json
-            def b64url(s): s += "=" * (-len(s) % 4); return base64.urlsafe_b64decode(s.encode())
-            try:
-                header  = json.loads(b64url(parts[0]).decode())
-                payload = json.loads(b64url(parts[1]).decode())
-                st.json({
-                    "iss": payload.get("iss"),
-                    "aud": payload.get("aud"),
-                    "azp": payload.get("azp"),
-                    "scope": payload.get("scope"),
-                    "resource_access": payload.get("resource_access"),
-                    "realm_access": payload.get("realm_access"),
-                    "exp": payload.get("exp"),
-                    # sometimes a company/org id is exposed; show a few commonly-used keys
-                    "company": payload.get("company") or payload.get("tenant") or payload.get("org") or payload.get("bexio_company_id"),
-                })
-            except Exception as e:
-                st.write(f"JWT decode error: {e}")
-        else:
-            st.write("Token is not a JWT?")
+    test_auth_url = _auth_link(scopes=scopes_input)
+    st.write({"auth_url": test_auth_url})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
