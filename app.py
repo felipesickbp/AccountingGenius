@@ -62,7 +62,7 @@ CLIENT_SECRET = _get("BEXIO_CLIENT_SECRET", HARDCODED_CLIENT_SECRET)
 REDIRECT_URI  = _get("BEXIO_REDIRECT_URI",  HARDCODED_REDIRECT_URI)
 
 # This is the minimum set for login + posting manual entries
-SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access accounting_edit")
+SCOPES = _get("BEXIO_SCOPES", "openid profile email offline_access accounting")
 
 
 # Bexio REST base + endpoint for manual journal entries (v2)
@@ -400,13 +400,14 @@ def _auth_link(force_login: bool = False, scopes: Optional[str] = None) -> str:
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
         "scope": scope_str,
-        "state": str(int(time.time())),  # ok to keep simple
+        "state": str(int(time.time())),
+        # these two help with refresh tokens on Keycloak
+        "prompt": "consent" if "offline_access" in scope_str else None,
+        "access_type": "offline",  # harmless if ignored
     }
-    if force_login:
-        params["prompt"] = "login"
+    params = {k: v for k, v in params.items() if v is not None}
     base = AUTH_URL or f"{OIDC_ISSUER}/protocol/openid-connect/auth"
     return f"{base}?{urlencode(params)}"
-
 
 def _is_authenticated() -> bool:
     return _token_valid()
@@ -415,22 +416,26 @@ def post_manual_entry(payload: Dict) -> Tuple[bool, str]:
     headers = _api_headers()
     if "Authorization" not in headers:
         return False, "Not authenticated (OAuth missing)"
+
     headers["Content-Type"] = "application/json"
 
-    url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"
-    safe_payload = _json_safe(payload)  # belt-and-braces
+    url = f"{API_BASE}{MANUAL_ENTRY_ENDPOINT}"  # /accounting/manual_entries
+    r = requests.post(url, headers=headers, json=_json_safe(payload), timeout=30)
 
-    r = requests.post(url, headers=headers, json=safe_payload, timeout=30)
+    # Surface the real error back to the UI
+    try:
+        detail = r.json()
+    except Exception:
+        detail = r.text[:800]
+
     if r.ok:
-        return True, r.text
+        return True, json.dumps(detail) if isinstance(detail, dict) else str(detail)
 
-    if r.status_code == 403:
-        return False, ("403 Forbidden – missing 'accounting_edit' scope or no accounting rights in selected company.")
-    if r.status_code == 401:
-        return False, "401 Unauthorized – token expired/invalid. Reconnect."
+    if r.status_code in (401, 403):
+        return False, f"{r.status_code} – token lacks 'accounting' scope or no rights for this company. Detail: {detail}"
     if r.status_code == 422:
-        return False, f"422 Validation error: {r.text}"
-    return False, f"{r.status_code} {r.reason}: {r.text[:800]}"
+        return False, f"422 Validation – {detail}"
+    return False, f"{r.status_code} {r.reason}: {detail}"
 
 
 
@@ -515,7 +520,6 @@ def row_to_manual_entry(row: pd.Series) -> Dict:
 
     return _json_safe(payload)
 
-
 def _api_headers() -> Dict[str, str]:
     _refresh_token_if_needed()
     headers = {"Accept": "application/json"}
@@ -524,14 +528,6 @@ def _api_headers() -> Dict[str, str]:
         headers["Authorization"] = f"Bearer {tok.access_token}"
     return headers
 
-
-    # OAuth fallback
-    _refresh_token_if_needed()
-    tok: Token = st.session_state.get("bexio_token")  # may be None
-    if not tok:
-        # No PAT and no OAuth token yet
-        return {"Accept": "application/json"}
-    return {"Accept": "application/json", "Authorization": f"Bearer {tok.access_token}"}
 
 def get_userinfo() -> Optional[Dict]:
     try:
