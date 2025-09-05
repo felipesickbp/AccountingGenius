@@ -658,7 +658,7 @@ with left:
         st.link_button("🔗 Connect to bexio (OAuth)", _auth_link(scopes=SCOPE_PRESET))
     else:
         st.success("Connected via OAuth")
-                  who = (
+              who = (
               info.get("email")
               or info.get("preferred_username")
               or info.get("name")
