@@ -653,18 +653,19 @@ with st.expander("OAuth debug"):
 
 left, right = st.columns([1, 1])
 with left:
-    tok_ok = _token_valid()   # safe to call now; helpers already defined below this line
+    tok_ok = _token_valid()  # safe to call now; helpers already defined below this line
     if not tok_ok:
         st.link_button("🔗 Connect to bexio (OAuth)", _auth_link(scopes=SCOPE_PRESET))
     else:
         st.success("Connected via OAuth")
-          who = (
-              info.get("email")
-              or info.get("preferred_username")
-              or info.get("name")
-              or info.get("sub")  # opaque user id fallback
-          )
-          st.caption(f"Logged in as: {who or '—'}")
+
+        who = (
+            info.get("email")
+            or info.get("preferred_username")
+            or info.get("name")
+            or info.get("sub")  # opaque user id fallback
+        )
+        st.caption(f"Logged in as: {who or '—'}")
 
         sc = _current_scopes()
         st.caption(f"Token scopes: {sc or '(unavailable)'}")
@@ -673,7 +674,10 @@ with left:
         code, txt = smoke_test()
         st.caption(f"API smoke test: {code}")
         if code != 200:
-            st.warning("Token is valid for login but not for the API. This usually means your app/client is not yet allowed to call the API or the required API scope(s) are missing.")
+            st.warning(
+                "Token is valid for login but not for the API. This usually means your app/client "
+                "is not yet allowed to call the API or the required API scope(s) are missing."
+            )
 
 
     st.caption(f"Issuer: {ISSUER}")
